@@ -1,0 +1,337 @@
+"""Reels-style subtitle rendering via ASS (libass).
+
+Оформление складывается из трёх независимых частей:
+- STYLE  — анимация + цвет (панч, караоке, неон, огонь…)
+- FONT   — шрифт (Montserrat, Oswald, Caveat…)
+- POSITION — где текст (сверху / по центру / снизу)
+"""
+
+import re
+from dataclasses import dataclass
+from pathlib import Path
+
+from bot.services.transcribe import SubtitleSegment, Word
+
+FONTS_DIR = Path(__file__).resolve().parent.parent.parent / "assets" / "fonts"
+
+
+# ---------- Шрифты ----------
+
+@dataclass(frozen=True)
+class FontChoice:
+    key: str
+    label: str
+    family: str
+    size_mult: float
+
+
+FONTS: dict[str, FontChoice] = {
+    "montserrat": FontChoice("montserrat", "Montserrat", "Montserrat", 1.0),
+    "russo": FontChoice("russo", "Russo One", "Russo One", 1.0),
+    "oswald": FontChoice("oswald", "Oswald", "Oswald", 1.12),
+    "unbounded": FontChoice("unbounded", "Unbounded", "Unbounded", 0.9),
+    "rubik": FontChoice("rubik", "Rubik", "Rubik", 1.0),
+    "caveat": FontChoice("caveat", "Caveat ✍️", "Caveat", 1.4),
+    "pattaya": FontChoice("pattaya", "Pattaya 🖌", "Pattaya", 1.3),
+    "yeseva": FontChoice("yeseva", "Yeseva 👑", "Yeseva One", 1.1),
+}
+FONT_ORDER = ["montserrat", "russo", "oswald", "unbounded", "rubik", "caveat", "pattaya", "yeseva"]
+DEFAULT_FONT = "montserrat"
+
+
+def get_font(key: str) -> FontChoice:
+    return FONTS.get(key, FONTS[DEFAULT_FONT])
+
+
+# ---------- Позиция ----------
+
+@dataclass(frozen=True)
+class Position:
+    key: str
+    label: str
+    alignment: int      # ASS numpad
+    margin_v_ratio: float
+
+
+POSITIONS: dict[str, Position] = {
+    "top": Position("top", "⬆️ Сверху", 8, 0.12),
+    "center": Position("center", "↕️ По центру", 5, 0.0),
+    "bottom": Position("bottom", "⬇️ Снизу", 2, 0.16),
+}
+POSITION_ORDER = ["top", "center", "bottom"]
+DEFAULT_POSITION = "center"
+
+
+def get_position(key: str) -> Position:
+    return POSITIONS.get(key, POSITIONS[DEFAULT_POSITION])
+
+
+# ---------- Стиль (анимация + цвет) ----------
+
+WHITE = "&H00FFFFFF"
+YELLOW = "&H0000FFFF"
+ORANGE = "&H0000A5FF"
+MINT = "&H006EE63C"
+PINK = "&H009314FF"
+CYAN = "&H00FFE500"
+GREEN = "&H006EFF6E"
+RED = "&H000000FF"
+PURPLE = "&H00FF20A0"
+BLUE = "&H00FF6E1E"
+BLACK = "&H00000000"
+
+
+# ---------- Цвета акцента ----------
+
+@dataclass(frozen=True)
+class ColorChoice:
+    key: str
+    label: str
+    value: str | None   # None = использовать цвет стиля
+
+
+COLORS: dict[str, ColorChoice] = {
+    "default": ColorChoice("default", "🎨 Как в стиле", None),
+    "white": ColorChoice("white", "⬜ Белый", WHITE),
+    "yellow": ColorChoice("yellow", "💛 Жёлтый", YELLOW),
+    "orange": ColorChoice("orange", "🧡 Оранж", ORANGE),
+    "red": ColorChoice("red", "❤️ Красный", RED),
+    "pink": ColorChoice("pink", "💗 Розовый", PINK),
+    "mint": ColorChoice("mint", "🌿 Мята", MINT),
+    "green": ColorChoice("green", "💚 Зелёный", GREEN),
+    "cyan": ColorChoice("cyan", "🩵 Циан", CYAN),
+    "purple": ColorChoice("purple", "💜 Фиолет", PURPLE),
+    "blue": ColorChoice("blue", "💙 Синий", BLUE),
+}
+COLOR_ORDER = ["default", "white", "yellow", "orange", "red", "pink", "mint", "green", "cyan", "purple", "blue"]
+DEFAULT_COLOR = "default"
+
+
+def get_color(key: str) -> ColorChoice:
+    return COLORS.get(key, COLORS[DEFAULT_COLOR])
+
+
+@dataclass(frozen=True)
+class SubtitleStyle:
+    key: str
+    label: str
+    mode: str            # "punch" | "karaoke" | "line"
+    primary: str         # цвет текста
+    highlight: str       # цвет активного слова (karaoke)
+    outline_colour: str
+    outline: int
+    shadow: int
+    fontsize_ratio: float
+    uppercase: bool
+    blur: int = 0
+
+
+STYLES: dict[str, SubtitleStyle] = {
+    "punch": SubtitleStyle("punch", "🔥 Панч", "punch", WHITE, YELLOW, BLACK, 6, 2, 0.072, True),
+    "fire": SubtitleStyle("fire", "🌶 Огонь", "punch", ORANGE, ORANGE, BLACK, 6, 2, 0.072, True),
+    "karaoke": SubtitleStyle("karaoke", "✨ Караоке", "karaoke", WHITE, YELLOW, BLACK, 5, 1, 0.058, False),
+    "mint": SubtitleStyle("mint", "🌿 Мята", "karaoke", WHITE, MINT, BLACK, 5, 1, 0.058, False),
+    "pink": SubtitleStyle("pink", "💗 Розовый", "karaoke", WHITE, PINK, BLACK, 5, 1, 0.058, False),
+    "neon": SubtitleStyle("neon", "💚 Неон", "line", GREEN, GREEN, "&H00202020", 4, 0, 0.06, True, blur=3),
+    "classic": SubtitleStyle("classic", "🎬 Классика", "line", WHITE, WHITE, BLACK, 5, 1, 0.052, False),
+}
+STYLE_ORDER = ["punch", "fire", "karaoke", "mint", "pink", "neon", "classic"]
+DEFAULT_STYLE = "punch"
+
+PUNCH_CHUNK_SIZE = 2
+
+
+def get_style(key: str) -> SubtitleStyle:
+    return STYLES.get(key, STYLES[DEFAULT_STYLE])
+
+
+# ---------- ASS builder ----------
+
+def _ass_time(seconds: float) -> str:
+    seconds = max(0.0, seconds)
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    centis = int(round((seconds - int(seconds)) * 100))
+    if centis == 100:
+        centis = 99
+    return f"{hours:01d}:{minutes:02d}:{secs:02d}.{centis:02d}"
+
+
+_EMOJI_RE = re.compile(
+    "[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF"
+    "\U00002B00-\U00002BFF\U0000FE00-\U0000FE0F\U0000200D\U00002190-\U000021FF]+",
+    flags=re.UNICODE,
+)
+
+
+def _strip_emoji(text: str) -> str:
+    # шрифты не содержат эмодзи-глифов → убираем, чтобы не было квадратов
+    return re.sub(r"\s{2,}", " ", _EMOJI_RE.sub("", text)).strip()
+
+
+def _escape(text: str) -> str:
+    text = _strip_emoji(text)
+    return (
+        text.replace("\\", "\\\\")
+        .replace("{", "(")
+        .replace("}", ")")
+        .replace("\n", " ")
+        .strip()
+    )
+
+
+def _escape_word(text: str) -> str:
+    # для панч/караоке: убираем служебные звёздочки
+    return _escape(text).replace("*", "")
+
+
+def _synth_words(segment: SubtitleSegment) -> list[Word]:
+    tokens = [t for t in segment.text.split() if t]
+    if not tokens:
+        return []
+    duration = max(segment.end - segment.start, 0.4)
+    step = duration / len(tokens)
+    return [
+        Word(text=tok, start=segment.start + i * step, end=segment.start + (i + 1) * step)
+        for i, tok in enumerate(tokens)
+    ]
+
+
+def _all_words(segments: list[SubtitleSegment]) -> list[Word]:
+    words: list[Word] = []
+    for segment in segments:
+        words.extend(segment.words or _synth_words(segment))
+    return words
+
+
+def _header(style: SubtitleStyle, font: FontChoice, position: Position, width: int, height: int) -> str:
+    fontsize = max(16, int(height * style.fontsize_ratio * font.size_mult))
+    margin_v = int(height * position.margin_v_ratio)
+    margin_h = int(width * 0.07)
+    return f"""[Script Info]
+ScriptType: v4.00+
+PlayResX: {width}
+PlayResY: {height}
+WrapStyle: 0
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: R,{font.family},{fontsize},{style.primary},{WHITE},{style.outline_colour},&H64000000,1,0,0,0,100,100,0,0,1,{style.outline},{style.shadow},{position.alignment},{margin_h},{margin_h},{margin_v},1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+
+
+def _prefix(style: SubtitleStyle) -> str:
+    return f"{{\\blur{style.blur}}}" if style.blur else ""
+
+
+def _dialogue(start: float, end: float, text: str) -> str:
+    return f"Dialogue: 0,{_ass_time(start)},{_ass_time(end)},R,,0,0,0,,{text}\n"
+
+
+def _highlight_keywords(escaped_text: str, accent: str, base: str) -> str:
+    """Слова, помеченные *звёздочками*, красим в акцентный цвет."""
+    def repl(m: re.Match) -> str:
+        return f"{{\\c{accent}}}{m.group(1)}{{\\c{base}}}"
+
+    return re.sub(r"\*(.+?)\*", repl, escaped_text)
+
+
+def _pop_tag() -> str:
+    # эффект "выпрыгивания" слова
+    return "{\\fscx55\\fscy55\\t(0,130,\\fscx100\\fscy100)}"
+
+
+def _build_punch(style: SubtitleStyle, segments: list[SubtitleSegment], accent: str | None) -> list[str]:
+    words = _all_words(segments)
+    lines: list[str] = []
+    prefix = _prefix(style)
+    text_color = accent or style.primary
+    for i in range(0, len(words), PUNCH_CHUNK_SIZE):
+        chunk = words[i : i + PUNCH_CHUNK_SIZE]
+        if not chunk:
+            continue
+        start = chunk[0].start
+        end = max(chunk[-1].end, start + 0.3)
+        text = _escape_word(" ".join(w.text for w in chunk))
+        if style.uppercase:
+            text = text.upper()
+        body = f"{prefix}{{\\c{text_color}}}{_pop_tag()}{text}"
+        lines.append(_dialogue(start, end, body))
+    return lines
+
+
+def _build_karaoke(style: SubtitleStyle, segments: list[SubtitleSegment], accent: str | None) -> list[str]:
+    lines: list[str] = []
+    prefix = _prefix(style)
+    highlight = accent or style.highlight
+    for segment in segments:
+        words = segment.words or _synth_words(segment)
+        if not words:
+            continue
+        start = words[0].start
+        end = max(words[-1].end, start + 0.3)
+        parts: list[str] = []
+        prev_end = start
+        for w in words:
+            gap_cs = int(round(max(0.0, w.start - prev_end) * 100))
+            if gap_cs > 0:
+                parts.append(f"{{\\k{gap_cs}}}")
+            dur_cs = max(1, int(round((w.end - w.start) * 100)))
+            token = _escape_word(w.text)
+            if style.uppercase:
+                token = token.upper()
+            parts.append(f"{{\\kf{dur_cs}\\c{highlight}}}{token} ")
+            prev_end = w.end
+        body = f"{prefix}{{\\c{WHITE}}}" + "".join(parts)
+        lines.append(_dialogue(start, end, body))
+    return lines
+
+
+def _build_line(style: SubtitleStyle, segments: list[SubtitleSegment], accent: str | None) -> list[str]:
+    lines: list[str] = []
+    prefix = _prefix(style)
+    base = accent or style.primary
+    key_accent = accent or style.highlight
+    for segment in segments:
+        text = _escape(segment.text)
+        if not text:
+            continue
+        if style.uppercase:
+            text = text.upper()
+        text = _highlight_keywords(text, key_accent, base)
+        body = f"{prefix}{{\\c{base}}}{{\\fad(80,80)}}{text}"
+        lines.append(_dialogue(segment.start, max(segment.end, segment.start + 0.4), body))
+    return lines
+
+
+def build_ass(
+    segments: list[SubtitleSegment],
+    style_key: str,
+    font_key: str,
+    position_key: str,
+    color_key: str,
+    width: int,
+    height: int,
+) -> str:
+    style = get_style(style_key)
+    font = get_font(font_key)
+    position = get_position(position_key)
+    accent = get_color(color_key).value
+    header = _header(style, font, position, width, height)
+
+    if style.mode == "punch":
+        events = _build_punch(style, segments, accent)
+    elif style.mode == "karaoke":
+        events = _build_karaoke(style, segments, accent)
+    else:
+        events = _build_line(style, segments, accent)
+
+    if not events:
+        events = _build_line(style, segments, accent)
+
+    return header + "".join(events)
