@@ -70,6 +70,28 @@ def get_video_size(video_path: str) -> tuple[int, int]:
         return 1080, 1920
 
 
+def get_media_duration(path: str) -> float:
+    ffprobe = get_ffprobe_binary()
+    try:
+        result = subprocess.run(
+            [
+                ffprobe,
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "csv=p=0",
+                path,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        return float(result.stdout.strip())
+    except Exception:
+        return 0.0
+
+
 def has_audio_stream(video_path: str) -> bool:
     ffprobe = get_ffprobe_binary()
     try:

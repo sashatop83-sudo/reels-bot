@@ -138,7 +138,11 @@ STYLES: dict[str, SubtitleStyle] = {
 STYLE_ORDER = ["punch", "fire", "karaoke", "mint", "pink", "neon", "classic"]
 DEFAULT_STYLE = "punch"
 
-PUNCH_CHUNK_SIZE = 2
+PUNCH_CHUNK_SIZE = 2      # слов в кадре для панч-стиля
+KARAOKE_MAX_WORDS = 4     # слов в строке караоке
+KARAOKE_MAX_CHARS = 22
+LINE_MAX_CHARS = 24       # символов в строке line-режима
+LINE_MAX_DUR = 3.0        # макс длительность одной строки, сек
 
 
 def get_style(key: str) -> SubtitleStyle:
@@ -205,6 +209,57 @@ def _all_words(segments: list[SubtitleSegment]) -> list[Word]:
     return words
 
 
+def _group_words(words: list[Word], max_words: int, max_chars: int, max_dur: float) -> list[list[Word]]:
+    """Разбить поток слов на короткие строки (по числу слов / символов / длительности)."""
+    lines: list[list[Word]] = []
+    cur: list[Word] = []
+    cur_chars = 0
+    for w in words:
+        wlen = len(w.text)
+        too_many = len(cur) >= max_words
+        too_long = cur and cur_chars + wlen + 1 > max_chars
+        too_far = cur and (w.end - cur[0].start) > max_dur
+        if cur and (too_many or too_long or too_far):
+            lines.append(cur)
+            cur, cur_chars = [], 0
+        cur.append(w)
+        cur_chars += wlen + 1
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+def _split_text_timed(seg: SubtitleSegment, max_chars: int) -> list[tuple[float, float, str]]:
+    """Разбить текст сегмента на короткие строки, распределив тайминг пропорционально длине."""
+    tokens = seg.text.split()
+    if not tokens:
+        return []
+    chunks: list[str] = []
+    cur: list[str] = []
+    cur_len = 0
+    for tok in tokens:
+        if cur and cur_len + len(tok) + 1 > max_chars:
+            chunks.append(" ".join(cur))
+            cur, cur_len = [], 0
+        cur.append(tok)
+        cur_len += len(tok) + 1
+    if cur:
+        chunks.append(" ".join(cur))
+
+    total_chars = sum(len(c) for c in chunks) or 1
+    duration = max(seg.end - seg.start, 0.4)
+    out: list[tuple[float, float, str]] = []
+    t = seg.start
+    for c in chunks:
+        d = max(duration * (len(c) / total_chars), 0.3)
+        out.append((t, t + d, c))
+        t += d
+    if out:
+        last_start, _, last_text = out[-1]
+        out[-1] = (last_start, max(seg.end, last_start + 0.3), last_text)
+    return out
+
+
 def _header(style: SubtitleStyle, font: FontChoice, position: Position, width: int, height: int) -> str:
     fontsize = max(16, int(height * style.fontsize_ratio * font.size_mult))
     margin_v = int(height * position.margin_v_ratio)
@@ -238,7 +293,8 @@ def _highlight_keywords(escaped_text: str, accent: str, base: str) -> str:
     def repl(m: re.Match) -> str:
         return f"{{\\c{accent}}}{m.group(1)}{{\\c{base}}}"
 
-    return re.sub(r"\*(.+?)\*", repl, escaped_text)
+    result = re.sub(r"\*(.+?)\*", repl, escaped_text)
+    return result.replace("*", "")  # убрать одиночные звёздочки (если пара разорвалась)
 
 
 def _pop_tag() -> str:
@@ -269,15 +325,15 @@ def _build_karaoke(style: SubtitleStyle, segments: list[SubtitleSegment], accent
     lines: list[str] = []
     prefix = _prefix(style)
     highlight = accent or style.highlight
-    for segment in segments:
-        words = segment.words or _synth_words(segment)
-        if not words:
+    words = _all_words(segments)
+    for group in _group_words(words, KARAOKE_MAX_WORDS, KARAOKE_MAX_CHARS, LINE_MAX_DUR):
+        if not group:
             continue
-        start = words[0].start
-        end = max(words[-1].end, start + 0.3)
+        start = group[0].start
+        end = max(group[-1].end, start + 0.3)
         parts: list[str] = []
         prev_end = start
-        for w in words:
+        for w in group:
             gap_cs = int(round(max(0.0, w.start - prev_end) * 100))
             if gap_cs > 0:
                 parts.append(f"{{\\k{gap_cs}}}")
@@ -298,14 +354,15 @@ def _build_line(style: SubtitleStyle, segments: list[SubtitleSegment], accent: s
     base = accent or style.primary
     key_accent = accent or style.highlight
     for segment in segments:
-        text = _escape(segment.text)
-        if not text:
-            continue
-        if style.uppercase:
-            text = text.upper()
-        text = _highlight_keywords(text, key_accent, base)
-        body = f"{prefix}{{\\c{base}}}{{\\fad(80,80)}}{text}"
-        lines.append(_dialogue(segment.start, max(segment.end, segment.start + 0.4), body))
+        for start, end, chunk_text in _split_text_timed(segment, LINE_MAX_CHARS):
+            text = _escape(chunk_text)
+            if not text:
+                continue
+            if style.uppercase:
+                text = text.upper()
+            text = _highlight_keywords(text, key_accent, base)
+            body = f"{prefix}{{\\c{base}}}{{\\fad(80,80)}}{text}"
+            lines.append(_dialogue(start, max(end, start + 0.4), body))
     return lines
 
 

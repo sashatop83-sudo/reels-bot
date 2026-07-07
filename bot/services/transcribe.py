@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from bot.services.ffmpeg_utils import get_ffmpeg_binary
+from bot.services.ffmpeg_utils import get_ffmpeg_binary, get_media_duration
 
 WHISPER_MODEL = "whisper-large-v3-turbo"
 
@@ -76,7 +76,7 @@ def _assign_words(segments: list[SubtitleSegment], words: list[Word]) -> None:
         ]
 
 
-def _parse_segments(response) -> list[SubtitleSegment]:
+def _parse_segments(response, total_duration: float = 0.0) -> list[SubtitleSegment]:
     segments: list[SubtitleSegment] = []
     raw_segments = _get(response, "segments") or []
 
@@ -95,9 +95,9 @@ def _parse_segments(response) -> list[SubtitleSegment]:
     _assign_words(segments, words)
 
     if not segments and _get(response, "text"):
-        segments.append(
-            SubtitleSegment(start=0.0, end=5.0, text=str(_get(response, "text")).strip())
-        )
+        full = str(_get(response, "text")).strip()
+        end = total_duration if total_duration and total_duration > 1 else max(len(full.split()) * 0.5, 3.0)
+        segments.append(SubtitleSegment(start=0.0, end=end, text=full))
 
     return segments
 
@@ -106,20 +106,39 @@ def transcribe_video(client, video_path: Path, work_dir: Path) -> list[SubtitleS
     audio_path = work_dir / "audio.mp3"
     _extract_audio(video_path, audio_path)
 
-    with audio_path.open("rb") as audio_file:
-        try:
+    response = None
+    # 1) лучший вариант — сегменты + слова
+    try:
+        with audio_path.open("rb") as audio_file:
             response = client.audio.transcriptions.create(
                 model=WHISPER_MODEL,
                 file=audio_file,
                 response_format="verbose_json",
                 timestamp_granularities=["segment", "word"],
             )
+    except Exception:
+        response = None
+
+    # 2) запасной — хотя бы сегменты с таймкодами (НЕ плоский json!)
+    if response is None or not (_get(response, "segments")):
+        try:
+            with audio_path.open("rb") as audio_file:
+                response = client.audio.transcriptions.create(
+                    model=WHISPER_MODEL,
+                    file=audio_file,
+                    response_format="verbose_json",
+                )
         except Exception:
-            audio_file.seek(0)
+            response = None
+
+    # 3) крайний случай — просто текст
+    if response is None:
+        with audio_path.open("rb") as audio_file:
             response = client.audio.transcriptions.create(
                 model=WHISPER_MODEL,
                 file=audio_file,
                 response_format="json",
             )
 
-    return _parse_segments(response)
+    duration = get_media_duration(str(audio_path))
+    return _parse_segments(response, duration)
