@@ -323,19 +323,28 @@ class TelegramBot:
                 plain_lines.append(s)
 
         if has_eq:
-            replaced = sum(self._replace_word(session, f, r) for f, r in word_edits)
+            done_pairs: list[str] = []
+            replaced = 0
+            for f, r in word_edits:
+                n = self._replace_word(session, f, r)
+                replaced += n
+                if n:
+                    done_pairs.append(f"{f}→{r}")
             changed = 0
             for idx, new_text in line_edits.items():
                 if 1 <= idx <= len(session.segments):
                     session.segments[idx - 1].text = new_text
                     session.segments[idx - 1].words = []
                     changed += 1
-            reports = []
-            if replaced:
-                reports.append(f"заменил слов: {replaced}")
+            if not replaced and not changed:
+                return "Не нашёл что заменить. Проверь слово и пришли ещё раз."
+            parts = ["✅ Готово!"]
+            if done_pairs:
+                parts.append("Заменил: " + ", ".join(done_pairs))
             if changed:
-                reports.append(f"изменил строк: {changed}")
-            return "Готово — " + ", ".join(reports) + "." if reports else "Не нашёл что заменить."
+                parts.append(f"Изменил строк: {changed}")
+            parts.append("Правки бесплатны. Жми 👁 Превью или 🎬 Сделать видео.")
+            return "\n".join(parts)
 
         cleaned = [re.sub(r"^\s*\d+\.\s*", "", ln) for ln in plain_lines]
         if not cleaned:
