@@ -101,7 +101,8 @@ def _ffmpeg_supports_subtitles(ffmpeg_bin: str) -> bool:
         text=True,
     )
     output = f"{result.stdout}\n{result.stderr}"
-    return "Unknown filter" not in output and "Render text subtitles" in output
+    # Достаточно, что фильтр существует (текст справки различается по версиям ffmpeg)
+    return "Unknown filter" not in output and "subtitles" in output.lower()
 
 
 def check_ffmpeg() -> str:
