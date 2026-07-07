@@ -66,6 +66,28 @@ def get_position(key: str) -> Position:
     return POSITIONS.get(key, POSITIONS[DEFAULT_POSITION])
 
 
+# ---------- Размер текста ----------
+
+@dataclass(frozen=True)
+class SizeChoice:
+    key: str
+    label: str
+    mult: float
+
+
+SIZES: dict[str, SizeChoice] = {
+    "s": SizeChoice("s", "🔸 Мелкий", 0.8),
+    "m": SizeChoice("m", "🔹 Средний", 1.0),
+    "l": SizeChoice("l", "🔶 Крупный", 1.25),
+}
+SIZE_ORDER = ["s", "m", "l"]
+DEFAULT_SIZE = "m"
+
+
+def get_size(key: str) -> SizeChoice:
+    return SIZES.get(key, SIZES[DEFAULT_SIZE])
+
+
 # ---------- Стиль (анимация + цвет) ----------
 
 WHITE = "&H00FFFFFF"
@@ -260,8 +282,8 @@ def _split_text_timed(seg: SubtitleSegment, max_chars: int) -> list[tuple[float,
     return out
 
 
-def _header(style: SubtitleStyle, font: FontChoice, position: Position, width: int, height: int) -> str:
-    fontsize = max(16, int(height * style.fontsize_ratio * font.size_mult))
+def _header(style: SubtitleStyle, font: FontChoice, position: Position, width: int, height: int, size_mult: float = 1.0) -> str:
+    fontsize = max(16, int(height * style.fontsize_ratio * font.size_mult * size_mult))
     margin_v = int(height * position.margin_v_ratio)
     margin_h = int(width * 0.07)
     return f"""[Script Info]
@@ -374,12 +396,14 @@ def build_ass(
     color_key: str,
     width: int,
     height: int,
+    size_key: str = DEFAULT_SIZE,
 ) -> str:
     style = get_style(style_key)
     font = get_font(font_key)
     position = get_position(position_key)
     accent = get_color(color_key).value
-    header = _header(style, font, position, width, height)
+    size_mult = get_size(size_key).mult
+    header = _header(style, font, position, width, height, size_mult)
 
     if style.mode == "punch":
         events = _build_punch(style, segments, accent)

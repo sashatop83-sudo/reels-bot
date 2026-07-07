@@ -34,16 +34,20 @@ from bot.services.subtitles import (
     DEFAULT_COLOR,
     DEFAULT_FONT,
     DEFAULT_POSITION,
+    DEFAULT_SIZE,
     DEFAULT_STYLE,
     FONT_ORDER,
     FONTS,
     POSITION_ORDER,
     POSITIONS,
+    SIZE_ORDER,
+    SIZES,
     STYLE_ORDER,
     STYLES,
     get_color,
     get_font,
     get_position,
+    get_size,
     get_style,
 )
 from bot.services.transcribe import SubtitleSegment
@@ -64,6 +68,7 @@ class Session:
     font: str = DEFAULT_FONT
     position: str = DEFAULT_POSITION
     color: str = DEFAULT_COLOR
+    size: str = DEFAULT_SIZE
     awaiting_edit: bool = False
     counted: bool = False
     control_message_id: int | None = None
@@ -109,6 +114,12 @@ class TelegramBot:
     async def answer_callback(self, callback_id: str, text: str = "") -> None:
         try:
             await self._api("answerCallbackQuery", callback_query_id=callback_id, text=text)
+        except Exception:
+            pass
+
+    async def delete_message(self, chat_id, message_id) -> None:
+        try:
+            await self._api("deleteMessage", chat_id=chat_id, message_id=message_id)
         except Exception:
             pass
 
@@ -174,10 +185,13 @@ class TelegramBot:
                 ],
                 [
                     {"text": f"🔤 Шрифт: {get_font(session.font).label}", "callback_data": "menu:font"},
-                    {"text": f"🌈 Цвет", "callback_data": "menu:color"},
+                    {"text": "🌈 Цвет", "callback_data": "menu:color"},
                 ],
                 [
                     {"text": f"📍 {get_position(session.position).label}", "callback_data": "menu:pos"},
+                    {"text": f"🔠 {get_size(session.size).label}", "callback_data": "menu:size"},
+                ],
+                [
                     {"text": "✏️ Текст", "callback_data": "edit"},
                 ],
                 [
@@ -233,10 +247,21 @@ class TelegramBot:
             f"🎨 Стиль: {get_style(session.style).label}\n"
             f"🔤 Шрифт: {get_font(session.font).label}\n"
             f"🌈 Цвет: {get_color(session.color).label}\n"
-            f"📍 Позиция: {get_position(session.position).label}\n\n"
+            f"📍 Позиция: {get_position(session.position).label}\n"
+            f"🔠 Размер: {get_size(session.size).label}\n\n"
             "💡 Ошибка в слове? Напиши в чат: неправильное = правильное\n"
             "👁 Превью покажет кадр, 🎬 сделает видео."
         )
+
+    async def _send_control_panel(self, chat_id, session: Session, keyboard: dict | None = None) -> None:
+        """Панель настроек ВСЕГДА живёт на текстовом сообщении — тогда кнопки редактируются и работают."""
+        if session.control_message_id:
+            await self.delete_message(chat_id, session.control_message_id)
+            session.control_message_id = None
+        control = await self.send_message(
+            chat_id, self._main_text(session), reply_markup=keyboard or self._main_keyboard(session)
+        )
+        session.control_message_id = control["message_id"]
 
     def welcome_text(self) -> str:
         return (
@@ -374,10 +399,7 @@ class TelegramBot:
                 result = self._apply_edits(session, text)
                 session.awaiting_edit = False
                 await self.send_message(chat_id, result)
-                control = await self.send_message(
-                    chat_id, self._main_text(session), reply_markup=self._main_keyboard(session)
-                )
-                session.control_message_id = control["message_id"]
+                await self._send_control_panel(chat_id, session)
                 return
 
         await self.send_message(chat_id, "Пришли видео — я сделаю Reels-субтитры 🎬")
@@ -584,15 +606,13 @@ class TelegramBot:
                 font=prefs["font"] if prefs["font"] in FONTS else DEFAULT_FONT,
                 position=prefs["position"] if prefs["position"] in POSITIONS else DEFAULT_POSITION,
                 color=prefs["color"] if prefs["color"] in COLORS else DEFAULT_COLOR,
+                size=prefs["size"] if prefs["size"] in SIZES else DEFAULT_SIZE,
             )
             self.sessions[user_id] = session
             log_event(user_id, "upload")
 
-            await self.edit_message(chat_id, status_id, "✅ Текст распознан!")
-            control = await self.send_message(
-                chat_id, self._main_text(session), reply_markup=self._main_keyboard(session)
-            )
-            session.control_message_id = control["message_id"]
+            await self.edit_message(chat_id, status_id, "✅ Текст распознан! Настрой субтитры 👇")
+            await self._send_control_panel(chat_id, session)
         except VideoProcessingError as exc:
             logger.exception("Prepare failed")
             await self.edit_message(chat_id, status_id, f"⚠️ {exc}")
@@ -639,6 +659,7 @@ class TelegramBot:
             "menu:font": ("🔤 Выбери шрифт:", FONT_ORDER, FONTS, session.font, "font", 2),
             "menu:color": ("🌈 Выбери цвет:", COLOR_ORDER, COLORS, session.color, "color", 2),
             "menu:pos": ("📍 Где показывать текст:", POSITION_ORDER, POSITIONS, session.position, "pos", 1),
+            "menu:size": ("🔠 Размер текста:", SIZE_ORDER, SIZES, session.size, "size", 3),
         }
         if data in menus:
             title, order, reg, cur, pref, per_row = menus[data]
@@ -656,6 +677,7 @@ class TelegramBot:
             "font": (FONTS, "font"),
             "color": (COLORS, "color"),
             "pos": (POSITIONS, "position"),
+            "size": (SIZES, "size"),
         }
         if ":" in data:
             prefix, key = data.split(":", 1)
@@ -709,14 +731,16 @@ class TelegramBot:
             async with self.render_sem:
                 preview_path = await asyncio.to_thread(
                     render_preview, session.video_path, session.segments,
-                    session.style, session.font, session.position, session.color, out_dir,
+                    session.style, session.font, session.position, session.color, out_dir, session.size,
                 )
-            await self.edit_message(chat_id, status_id, "Вот как будет выглядеть 👇")
+            await self.delete_message(chat_id, status_id)
+            # фото БЕЗ меню (на фото кнопки-меню не редактируются)
             await self.send_photo(
                 chat_id, preview_path,
-                caption="Нравится? Жми 🎬 «Сделать видео». Или поменяй настройки.",
-                reply_markup=self._main_keyboard(session),
+                caption="👆 Так будет выглядеть. Меняй настройки ниже или жми «Сделать видео».",
             )
+            # свежая панель настроек — на текстовом сообщении, кнопки рабочие
+            await self._send_control_panel(chat_id, session)
         except VideoProcessingError as exc:
             await self.edit_message(chat_id, status_id, f"⚠️ {exc}")
         except Exception as exc:
@@ -732,21 +756,24 @@ class TelegramBot:
             async with self.render_sem:
                 result_path = await asyncio.to_thread(
                     render_segments, session.video_path, session.segments,
-                    session.style, session.font, session.position, session.color, out_dir,
+                    session.style, session.font, session.position, session.color, out_dir, session.size,
                 )
-            await self.edit_message(chat_id, status_id, "📤 Готово! Отправляю…")
+            await self.delete_message(chat_id, status_id)
             caption = (
                 f"✅ Готово! {get_style(session.style).label} · {get_font(session.font).label}\n\n"
-                "Хочешь другой вариант — поменяй настройки и жми «Сделать видео»."
+                "Хочешь другой вариант — поменяй настройки ниже и жми «Сделать видео»."
             )
-            await self.send_video(chat_id, result_path, caption, self._after_render_keyboard(session))
+            # видео БЕЗ меню-кнопок (на видео они не редактируются)
+            await self.send_video(chat_id, result_path, caption)
 
             if not session.counted:
                 increment_usage(user_id)
                 session.counted = True
                 log_event(user_id, "render")
-            save_prefs(user_id, session.style, session.font, session.position, session.color)
+            save_prefs(user_id, session.style, session.font, session.position, session.color, session.size)
             await self.send_message(chat_id, self._status_text(user_id))
+            # свежая панель — для нового варианта
+            await self._send_control_panel(chat_id, session, self._after_render_keyboard(session))
         except VideoProcessingError as exc:
             await self.edit_message(chat_id, status_id, f"⚠️ {exc}")
         except Exception as exc:

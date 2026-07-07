@@ -48,12 +48,13 @@ def render_segments(
     position_key: str,
     color_key: str,
     out_dir: Path,
+    size_key: str = "m",
 ) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     output_path = out_dir / "result.mp4"
     try:
         render_video_with_subtitles(
-            video_path, segments, output_path, style_key, font_key, position_key, color_key
+            video_path, segments, output_path, style_key, font_key, position_key, color_key, size_key
         )
         return output_path
     except RuntimeError as exc:
@@ -70,12 +71,13 @@ def render_preview(
     position_key: str,
     color_key: str,
     out_dir: Path,
+    size_key: str = "m",
 ) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     output_path = out_dir / "preview.png"
     try:
         render_preview_image(
-            video_path, segments, output_path, style_key, font_key, position_key, color_key
+            video_path, segments, output_path, style_key, font_key, position_key, color_key, size_key
         )
         return output_path
     except RuntimeError as exc:

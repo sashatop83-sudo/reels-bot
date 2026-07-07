@@ -16,6 +16,7 @@ USER_COLUMNS = {
     "pref_font": "TEXT",
     "pref_position": "TEXT",
     "pref_color": "TEXT",
+    "pref_size": "TEXT",
     "created_at": "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
 }
 
@@ -155,15 +156,15 @@ def try_set_referrer(user_id: int, referrer_id: int, bonus: int) -> bool:
         return True
 
 
-def save_prefs(user_id: int, style: str, font: str, position: str, color: str) -> None:
+def save_prefs(user_id: int, style: str, font: str, position: str, color: str, size: str = "m") -> None:
     with _connect() as conn:
         conn.execute(
             """
             UPDATE users
-            SET pref_style = ?, pref_font = ?, pref_position = ?, pref_color = ?
+            SET pref_style = ?, pref_font = ?, pref_position = ?, pref_color = ?, pref_size = ?
             WHERE user_id = ?
             """,
-            (style, font, position, color, user_id),
+            (style, font, position, color, size, user_id),
         )
         conn.commit()
 
@@ -175,6 +176,7 @@ def get_prefs(user_id: int) -> dict:
         "font": user["pref_font"],
         "position": user["pref_position"],
         "color": user["pref_color"],
+        "size": user["pref_size"],
     }
 
 

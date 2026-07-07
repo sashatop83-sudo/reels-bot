@@ -11,6 +11,7 @@ from bot.services.subtitles import (
     DEFAULT_COLOR,
     DEFAULT_FONT,
     DEFAULT_POSITION,
+    DEFAULT_SIZE,
     DEFAULT_STYLE,
     FONTS_DIR,
     build_ass,
@@ -66,6 +67,7 @@ def _prepare(
     font_key: str,
     position_key: str,
     color_key: str,
+    size_key: str,
 ) -> tuple[str, str, bool]:
     local_input = work_dir / "input.mp4"
     ass_path = work_dir / "subs.ass"
@@ -75,7 +77,7 @@ def _prepare(
     vertical_fit = _needs_vertical_fit(width, height)
     canvas_w, canvas_h = (TARGET_W, TARGET_H) if vertical_fit else (width, height)
 
-    ass_text = build_ass(segments, style_key, font_key, position_key, color_key, canvas_w, canvas_h)
+    ass_text = build_ass(segments, style_key, font_key, position_key, color_key, canvas_w, canvas_h, size_key)
     ass_path.write_text(ass_text, encoding="utf-8")
 
     filter_expr, mode, _, _ = _build_video_filter("subs.ass", vertical_fit)
@@ -90,12 +92,13 @@ def render_video_with_subtitles(
     font_key: str = DEFAULT_FONT,
     position_key: str = DEFAULT_POSITION,
     color_key: str = DEFAULT_COLOR,
+    size_key: str = DEFAULT_SIZE,
 ) -> Path:
     ffmpeg_bin = get_ffmpeg_binary()
     work_dir = output_path.parent
 
     filter_expr, mode, _ = _prepare(
-        video_path, segments, work_dir, style_key, font_key, position_key, color_key
+        video_path, segments, work_dir, style_key, font_key, position_key, color_key, size_key
     )
 
     audio = has_audio_stream(str(work_dir / "input.mp4"))
@@ -137,21 +140,23 @@ def render_preview_image(
     font_key: str = DEFAULT_FONT,
     position_key: str = DEFAULT_POSITION,
     color_key: str = DEFAULT_COLOR,
+    size_key: str = DEFAULT_SIZE,
 ) -> Path:
     """Один кадр с субтитрами — быстрый предпросмотр перед рендером."""
     ffmpeg_bin = get_ffmpeg_binary()
     work_dir = output_path.parent
 
     filter_expr, mode, _ = _prepare(
-        video_path, segments, work_dir, style_key, font_key, position_key, color_key
+        video_path, segments, work_dir, style_key, font_key, position_key, color_key, size_key
     )
 
+    # берём момент, когда точно есть текст — середину первого сегмента
     if segments:
         first = segments[0]
-        ts = min(first.start + 0.4, (first.start + first.end) / 2 + 0.1)
+        ts = first.start + max((first.end - first.start) * 0.5, 0.2)
     else:
         ts = 0.5
-    ts = max(ts, 0.1)
+    ts = max(ts, 0.15)
 
     # -ss ПОСЛЕ -i (output seeking), чтобы тайминги субтитров совпадали с кадром
     args = [ffmpeg_bin, "-y", "-i", "input.mp4", "-ss", f"{ts:.2f}"]
