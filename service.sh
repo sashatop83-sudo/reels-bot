@@ -61,10 +61,19 @@ stop_service() {
   echo "🛑 Бот остановлен."
 }
 
+uninstall_service() {
+  launchctl bootout "gui/$UID_NUM/$LABEL" 2>/dev/null || true
+  rm -f "$PLIST"
+  pkill -f "bot.main" 2>/dev/null || true
+  echo "🗑  Автозапуск удалён полностью, процессы убиты."
+  echo "Локальный бот больше не запустится (в т.ч. после перезагрузки)."
+}
+
 case "$1" in
   install) install_service ;;
   stop) stop_service ;;
   restart) stop_service; sleep 1; install_service ;;
+  uninstall) uninstall_service ;;
   logs) touch "$LOG"; tail -n 100 -f "$LOG" ;;
   status)
     if launchctl print "gui/$UID_NUM/$LABEL" >/dev/null 2>&1; then
@@ -74,6 +83,6 @@ case "$1" in
     fi
     ;;
   *)
-    echo "Использование: bash service.sh {install|stop|restart|logs|status}"
+    echo "Использование: bash service.sh {install|stop|restart|uninstall|logs|status}"
     ;;
 esac

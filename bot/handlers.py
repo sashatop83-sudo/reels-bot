@@ -84,6 +84,7 @@ class TelegramBot:
         self.busy: set[int] = set()
         self.render_sem = asyncio.Semaphore(settings.max_concurrent_renders)
         self.bot_username = ""
+        self._seen_updates: set[int] = set()
 
     # ---------- Telegram API ----------
 
@@ -249,8 +250,9 @@ class TelegramBot:
             f"🌈 Цвет: {get_color(session.color).label}\n"
             f"📍 Позиция: {get_position(session.position).label}\n"
             f"🔠 Размер: {get_size(session.size).label}\n\n"
-            "💡 Ошибка в слове? Напиши в чат: неправильное = правильное\n"
-            "👁 Превью покажет кадр, 🎬 сделает видео."
+            "💡 Ошибка в тексте? Прямо напиши в чат: было = стало\n"
+            "(правки бесплатны, лимит не тратится)\n"
+            "👁 Превью — кадр, 🎬 — готовое видео."
         )
 
     async def _send_control_panel(self, chat_id, session: Session, keyboard: dict | None = None) -> None:
@@ -654,11 +656,14 @@ class TelegramBot:
             return
         session.control_message_id = message_id
 
+        style_title = "🎨 Стиль — как выглядят и двигаются субтитры:\n\n" + "\n".join(
+            f"{STYLES[k].label} — {STYLES[k].desc}" for k in STYLE_ORDER
+        )
         menus = {
-            "menu:style": ("🎨 Выбери стиль:", STYLE_ORDER, STYLES, session.style, "style", 2),
-            "menu:font": ("🔤 Выбери шрифт:", FONT_ORDER, FONTS, session.font, "font", 2),
-            "menu:color": ("🌈 Выбери цвет:", COLOR_ORDER, COLORS, session.color, "color", 2),
-            "menu:pos": ("📍 Где показывать текст:", POSITION_ORDER, POSITIONS, session.position, "pos", 1),
+            "menu:style": (style_title, STYLE_ORDER, STYLES, session.style, "style", 2),
+            "menu:font": ("🔤 Шрифт — начертание букв. Выбери вайб:", FONT_ORDER, FONTS, session.font, "font", 2),
+            "menu:color": ("🌈 Цвет акцентных слов:", COLOR_ORDER, COLORS, session.color, "color", 2),
+            "menu:pos": ("📍 Где показывать текст на видео:", POSITION_ORDER, POSITIONS, session.position, "pos", 1),
             "menu:size": ("🔠 Размер текста:", SIZE_ORDER, SIZES, session.size, "size", 3),
         }
         if data in menus:
@@ -691,16 +696,15 @@ class TelegramBot:
 
         if data == "edit":
             session.awaiting_edit = True
-            await self.answer_callback(callback_id, "Жду новый текст")
+            await self.answer_callback(callback_id, "Жду исправление")
             await self.send_message(
                 chat_id,
-                "✏️ Как поправить текст:\n\n"
-                "🔹 Заменить слово (проще всего):\n"
-                "   неправильное = правильное\n"
-                "   Пример: будет = помог\n\n"
-                "🔹 Несколько замен — каждую с новой строки\n"
-                "🔹 Строку целиком: номер = новый текст\n"
-                "🔹 Или пришли весь текст заново списком.",
+                "✏️ Просто напиши в чат, что заменить:\n\n"
+                "   было = стало\n"
+                "   Пример: превет = привет\n\n"
+                "🔹 Можно несколько замен — каждую с новой строки\n"
+                "🔹 Строку целиком: 2 = новый текст\n\n"
+                "✅ Правки бесплатные — это то же видео, лимит не тратится.",
             )
             return
 
@@ -799,7 +803,13 @@ class TelegramBot:
                     allowed_updates=["message", "callback_query", "pre_checkout_query"],
                 )
                 for update in updates:
-                    self.offset = update["update_id"] + 1
+                    uid = update["update_id"]
+                    self.offset = uid + 1
+                    if uid in self._seen_updates:
+                        continue
+                    self._seen_updates.add(uid)
+                    if len(self._seen_updates) > 1000:
+                        self._seen_updates = set(list(self._seen_updates)[-500:])
                     await self.handle_update(update)
             except Exception:
                 logger.exception("Polling error")

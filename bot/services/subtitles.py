@@ -26,14 +26,14 @@ class FontChoice:
 
 
 FONTS: dict[str, FontChoice] = {
-    "montserrat": FontChoice("montserrat", "Montserrat", "Montserrat", 1.0),
-    "russo": FontChoice("russo", "Russo One", "Russo One", 1.0),
-    "oswald": FontChoice("oswald", "Oswald", "Oswald", 1.12),
-    "unbounded": FontChoice("unbounded", "Unbounded", "Unbounded", 0.9),
-    "rubik": FontChoice("rubik", "Rubik", "Rubik", 1.0),
-    "caveat": FontChoice("caveat", "Caveat ✍️", "Caveat", 1.4),
-    "pattaya": FontChoice("pattaya", "Pattaya 🖌", "Pattaya", 1.3),
-    "yeseva": FontChoice("yeseva", "Yeseva 👑", "Yeseva One", 1.1),
+    "montserrat": FontChoice("montserrat", "Инста-чистый", "Montserrat", 1.0),
+    "russo": FontChoice("russo", "Жирный блок", "Russo One", 1.0),
+    "oswald": FontChoice("oswald", "Высокий тренд", "Oswald", 1.12),
+    "unbounded": FontChoice("unbounded", "Модный", "Unbounded", 0.9),
+    "rubik": FontChoice("rubik", "Простой", "Rubik", 1.0),
+    "caveat": FontChoice("caveat", "От руки ✍️", "Caveat", 1.4),
+    "pattaya": FontChoice("pattaya", "Кисть 🖌", "Pattaya", 1.3),
+    "yeseva": FontChoice("yeseva", "Элегант 👑", "Yeseva One", 1.1),
 }
 FONT_ORDER = ["montserrat", "russo", "oswald", "unbounded", "rubik", "caveat", "pattaya", "yeseva"]
 DEFAULT_FONT = "montserrat"
@@ -146,19 +146,40 @@ class SubtitleStyle:
     fontsize_ratio: float
     uppercase: bool
     blur: int = 0
+    desc: str = ""
 
 
 STYLES: dict[str, SubtitleStyle] = {
-    "punch": SubtitleStyle("punch", "🔥 Панч", "punch", WHITE, YELLOW, BLACK, 6, 2, 0.072, True),
-    "fire": SubtitleStyle("fire", "🌶 Огонь", "punch", ORANGE, ORANGE, BLACK, 6, 2, 0.072, True),
-    "karaoke": SubtitleStyle("karaoke", "✨ Караоке", "karaoke", WHITE, YELLOW, BLACK, 5, 1, 0.058, False),
-    "mint": SubtitleStyle("mint", "🌿 Мята", "karaoke", WHITE, MINT, BLACK, 5, 1, 0.058, False),
-    "pink": SubtitleStyle("pink", "💗 Розовый", "karaoke", WHITE, PINK, BLACK, 5, 1, 0.058, False),
-    "neon": SubtitleStyle("neon", "💚 Неон", "line", GREEN, GREEN, "&H00202020", 4, 0, 0.06, True, blur=3),
-    "classic": SubtitleStyle("classic", "🎬 Классика", "line", WHITE, WHITE, BLACK, 5, 1, 0.052, False),
+    # ⚡️ ХАЙЛАЙТ — самый трендовый: слова появляются по одному, активное вспыхивает жёлтым
+    "hormozi": SubtitleStyle("hormozi", "⚡️ Хайлайт", "karaoke", WHITE, YELLOW, BLACK, 7, 2, 0.062, True,
+                             desc="Слово за словом, активное — жёлтым. Тренд TikTok/Reels."),
+    # 🔥 ПАНЧ — крупные слова по 2, выпрыгивают
+    "punch": SubtitleStyle("punch", "🔥 Панч", "punch", WHITE, YELLOW, BLACK, 6, 2, 0.070, True,
+                           desc="Крупные слова по 2, эффект выпрыгивания."),
+    # 🌶 ОГОНЬ — жирный оранжевый
+    "fire": SubtitleStyle("fire", "🌶 Огонь", "punch", ORANGE, ORANGE, BLACK, 6, 2, 0.070, True,
+                          desc="Оранжевый жирный панч, агрессивно и ярко."),
+    # 🎤 КАРАОКЕ — плавная заливка слов по ходу речи
+    "karaoke": SubtitleStyle("karaoke", "🎤 Караоке", "karaoke", WHITE, CYAN, BLACK, 5, 1, 0.056, False,
+                             desc="Слова заливаются цветом по ходу речи."),
+    # 🌿 МЯТА — мягкий мятный акцент
+    "mint": SubtitleStyle("mint", "🌿 Мята", "karaoke", WHITE, MINT, BLACK, 5, 1, 0.056, False,
+                          desc="Спокойный мятный акцент, чисто и мягко."),
+    # 💗 РОЗОВЫЙ — гламурный
+    "pink": SubtitleStyle("pink", "💗 Розовый", "karaoke", WHITE, PINK, BLACK, 5, 1, 0.056, False,
+                          desc="Розовый акцент, для лайфстайл/бьюти."),
+    # 💜 НЕОН — свечение
+    "neon": SubtitleStyle("neon", "💜 Неон", "line", WHITE, WHITE, PURPLE, 3, 0, 0.058, True, blur=4,
+                          desc="Неоновое свечение, вайб ночного TikTok."),
+    # ⚪️ МИНИМАЛ — чистый белый, как подписи в Instagram
+    "minimal": SubtitleStyle("minimal", "⚪️ Минимал", "line", WHITE, YELLOW, BLACK, 3, 1, 0.050, False,
+                             desc="Чистый белый текст, минимализм Instagram."),
+    # 🎬 КЛАССИКА — как субтитры в кино
+    "classic": SubtitleStyle("classic", "🎬 Классика", "line", WHITE, WHITE, BLACK, 4, 1, 0.048, False,
+                             desc="Обычные аккуратные субтитры, как в кино."),
 }
-STYLE_ORDER = ["punch", "fire", "karaoke", "mint", "pink", "neon", "classic"]
-DEFAULT_STYLE = "punch"
+STYLE_ORDER = ["hormozi", "punch", "fire", "karaoke", "mint", "pink", "neon", "minimal", "classic"]
+DEFAULT_STYLE = "hormozi"
 
 PUNCH_CHUNK_SIZE = 2      # слов в кадре для панч-стиля
 KARAOKE_MAX_WORDS = 4     # слов в строке караоке
