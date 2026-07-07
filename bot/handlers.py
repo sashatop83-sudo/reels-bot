@@ -158,6 +158,11 @@ class TelegramBot:
             )
         except Exception:
             pass
+        # Синяя кнопка "Меню" у поля ввода — открывает список команд
+        try:
+            await self._api("setChatMenuButton", menu_button={"type": "commands"})
+        except Exception:
+            pass
 
     # ---------- Keyboards ----------
 
