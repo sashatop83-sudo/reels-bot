@@ -7,6 +7,8 @@ from openai import OpenAI
 load_dotenv()
 
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+# Telegram Bot API не даёт боту скачать файл больше 20 MB (без Local Bot API Server).
+TELEGRAM_MAX_FILE_MB = 20
 
 
 @dataclass(frozen=True)
@@ -19,6 +21,7 @@ class Settings:
     sub_days: int
     referral_bonus: int
     max_concurrent_renders: int
+    max_video_size_mb: int
     payment_provider_token: str
     payment_info: str
 
@@ -58,6 +61,7 @@ def get_settings() -> Settings:
         sub_days=_int_env("SUB_DAYS", 30),
         referral_bonus=_int_env("REFERRAL_BONUS", 3),
         max_concurrent_renders=_int_env("MAX_CONCURRENT_RENDERS", 2),
+        max_video_size_mb=min(_int_env("MAX_VIDEO_SIZE_MB", TELEGRAM_MAX_FILE_MB), TELEGRAM_MAX_FILE_MB),
         payment_provider_token=os.getenv("PAYMENT_PROVIDER_TOKEN", "").strip(),
         payment_info=os.getenv("PAYMENT_INFO", "").strip() or DEFAULT_PAYMENT_INFO,
     )

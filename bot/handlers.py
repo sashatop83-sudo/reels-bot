@@ -22,6 +22,7 @@ from bot.db import (
     set_premium,
     try_set_referrer,
 )
+from bot.services.merge_video import merge_video_parts
 from bot.services.pipeline import (
     VideoProcessingError,
     prepare_segments,
@@ -54,9 +55,15 @@ from bot.services.transcribe import SubtitleSegment
 
 logger = logging.getLogger(__name__)
 
-MAX_VIDEO_SIZE_MB = 20
 MAX_PREVIEW_CHARS = 3000
 PAIR_RE = re.compile(r"^\s*(.+?)\s*=\s*(.+?)\s*$")
+MAX_PARTS = 15
+
+
+@dataclass
+class PartUpload:
+    work_dir: Path
+    parts: list[Path]
 
 
 @dataclass
@@ -81,6 +88,7 @@ class TelegramBot:
         self.ai_client = create_groq_client(settings.groq_api_key)
         self.offset = 0
         self.sessions: dict[int, Session] = {}
+        self.part_uploads: dict[int, PartUpload] = {}
         self.busy: set[int] = set()
         self.render_sem = asyncio.Semaphore(settings.max_concurrent_renders)
         self.bot_username = ""
@@ -165,6 +173,7 @@ class TelegramBot:
                     {"command": "status", "description": "Сколько видео осталось"},
                     {"command": "buy", "description": "💎 PRO-подписка (безлимит)"},
                     {"command": "invite", "description": "👥 Пригласить друга (+видео)"},
+                    {"command": "big", "description": "📦 Большое видео (частями)"},
                     {"command": "help", "description": "Как пользоваться"},
                 ],
             )
@@ -228,6 +237,19 @@ class TelegramBot:
             ]
         }
 
+    def _parts_keyboard(self) -> dict:
+        return {
+            "inline_keyboard": [
+                [{"text": "✅ Все части отправлены — склеить", "callback_data": "parts:done"}],
+                [{"text": "❌ Отмена", "callback_data": "parts:cancel"}],
+            ]
+        }
+
+    @staticmethod
+    def _parts_needed(size_bytes: int, limit_mb: int) -> int:
+        chunk = limit_mb * 1024 * 1024
+        return max(2, (size_bytes + chunk - 1) // chunk)
+
     # ---------- Text ----------
 
     def _clean(self, text: str) -> str:
@@ -268,7 +290,8 @@ class TelegramBot:
     def welcome_text(self) -> str:
         return (
             "👋 Привет! Я делаю видео с крутыми Reels-субтитрами.\n\n"
-            "1️⃣ Пришли видео (до 20 MB)\n"
+            f"1️⃣ Пришли видео (до {self.settings.max_video_size_mb} MB)\n"
+            f"   или /big — если видео больше (91 MB → 5 частей)\n"
             "2️⃣ Я распознаю речь\n"
             "3️⃣ Выберешь стиль, шрифт, цвет, позицию\n"
             "4️⃣ Поправишь слова при желании\n"
@@ -285,6 +308,11 @@ class TelegramBot:
         session = self.sessions.pop(user_id, None)
         if session:
             shutil.rmtree(session.work_dir, ignore_errors=True)
+
+    def _cleanup_parts(self, user_id: int) -> None:
+        upload = self.part_uploads.pop(user_id, None)
+        if upload:
+            shutil.rmtree(upload.work_dir, ignore_errors=True)
 
     def _replace_word(self, session: Session, find: str, repl: str) -> int:
         pattern = re.compile(rf"(?<!\w){re.escape(find)}(?!\w)", re.IGNORECASE | re.UNICODE)
@@ -381,7 +409,13 @@ class TelegramBot:
             await self._handle_start(chat_id, user_id, text)
             return
         if text.startswith("/help"):
-            await self.send_message(chat_id, self.welcome_text())
+            if "big" in text.lower() or "больш" in text.lower():
+                await self.send_message(chat_id, self._big_help_text())
+            else:
+                await self.send_message(chat_id, self.welcome_text())
+            return
+        if text.startswith("/big"):
+            await self._handle_big(chat_id, user_id)
             return
         if text.startswith("/status"):
             await self.send_message(chat_id, self._status_text(user_id))
@@ -400,7 +434,10 @@ class TelegramBot:
             return
 
         if message.get("video") or message.get("document"):
-            await self._handle_video(chat_id, user_id, message.get("video"), message.get("document"))
+            if user_id in self.part_uploads:
+                await self._handle_part_video(chat_id, user_id, message.get("video"), message.get("document"))
+            else:
+                await self._handle_video(chat_id, user_id, message.get("video"), message.get("document"))
             return
 
         if text and not text.startswith("/"):
@@ -566,6 +603,161 @@ class TelegramBot:
 
     # ---------- Video ----------
 
+    def _big_help_text(self) -> str:
+        lim = self.settings.max_video_size_mb
+        return (
+            f"📦 Большое видео (больше {lim} MB)\n\n"
+            "Telegram не даёт боту скачать файл больше 20 MB за раз.\n"
+            "Поэтому: разбей видео на части и отправь по очереди.\n\n"
+            "Пример: видео 91 MB → **5 частей** по ~18 MB\n\n"
+            "Как разбить:\n"
+            "• **iPhone:** приложение «MP4Splitter» / CapCut (экспорт по кускам)\n"
+            "• **Mac:** открой видео в QuickTime → File → Export → укороти и режь\n"
+            "• **Онлайн:** clideo.com/split-video (бесплатно)\n\n"
+            "Потом в боте:\n"
+            "1. /big\n"
+            "2. Отправь часть 1, часть 2, часть 3… (как **файл**, не как сжатое видео)\n"
+            "3. Жми «✅ Все части отправлены — склеить»\n"
+            "4. Бот склеит и сделает субтитры на всё видео"
+        )
+
+    async def _handle_big(self, chat_id: int, user_id: int) -> None:
+        if not can_process_video(user_id, self.settings.free_video_limit):
+            await self.send_message(
+                chat_id,
+                "😔 Бесплатные видео закончились.\n\n"
+                f"💎 PRO — {self.settings.price_rub}₽/мес: /buy",
+                reply_markup=self._buy_keyboard(),
+            )
+            return
+        if user_id in self.busy:
+            await self.send_message(chat_id, "⏳ Уже обрабатываю видео, подожди.")
+            return
+        self._cleanup_session(user_id)
+        self._cleanup_parts(user_id)
+        work_dir = Path(tempfile.mkdtemp(prefix="reels-bot-parts-"))
+        self.part_uploads[user_id] = PartUpload(work_dir=work_dir, parts=[])
+        lim = self.settings.max_video_size_mb
+        await self.send_message(
+            chat_id,
+            f"📦 Режим большого видео\n\n"
+            f"Отправляй части по **{lim} MB** каждая (лучше как **файл/документ**).\n"
+            "Когда все части отправлены — жми кнопку ниже.\n\n"
+            f"91 MB ≈ 5 частей. Подробнее: /help big",
+            reply_markup=self._parts_keyboard(),
+        )
+
+    async def _handle_part_video(self, chat_id, user_id, video, document) -> None:
+        upload = self.part_uploads.get(user_id)
+        if not upload:
+            return
+
+        if user_id in self.busy:
+            await self.send_message(chat_id, "⏳ Уже склеиваю, подожди.")
+            return
+
+        file_name = f"part_{len(upload.parts) + 1:02d}.mp4"
+        if video:
+            file_id = video["file_id"]
+            file_size = video.get("file_size") or 0
+        else:
+            mime = (document or {}).get("mime_type") or ""
+            if not mime.startswith("video/"):
+                await self.send_message(chat_id, "Пришли видеофайл (mp4, mov) или отмени: /big")
+                return
+            file_id = document["file_id"]
+            file_name = document.get("file_name") or file_name
+            file_size = document.get("file_size") or 0
+
+        limit_mb = self.settings.max_video_size_mb
+        if file_size > limit_mb * 1024 * 1024:
+            await self.send_message(
+                chat_id,
+                f"Часть слишком большая ({file_size // (1024*1024)} MB). "
+                f"Каждая часть — до {limit_mb} MB.\n"
+                "Разбей этот кусок ещё на 2 части.",
+            )
+            return
+
+        if len(upload.parts) >= MAX_PARTS:
+            await self.send_message(chat_id, f"Максимум {MAX_PARTS} частей. Жми «✅ Все части отправлены».")
+            return
+
+        part_path = upload.work_dir / file_name
+        try:
+            await self.download_file(file_id, part_path)
+            upload.parts.append(part_path)
+            total_mb = sum(p.stat().st_size for p in upload.parts) // (1024 * 1024)
+            await self.send_message(
+                chat_id,
+                f"✅ Часть {len(upload.parts)} принята ({part_path.stat().st_size // (1024*1024)} MB).\n"
+                f"Всего частей: {len(upload.parts)} (~{total_mb} MB).\n\n"
+                "Отправь следующую часть или жми «✅ Все части отправлены».",
+                reply_markup=self._parts_keyboard(),
+            )
+        except Exception as exc:
+            logger.exception("Part download failed")
+            await self.send_message(chat_id, f"⚠️ Не удалось скачать часть: {exc}")
+
+    async def _finish_parts(self, chat_id: int, user_id: int) -> None:
+        upload = self.part_uploads.pop(user_id, None)
+        if not upload or not upload.parts:
+            await self.send_message(chat_id, "Нет частей. Начни заново: /big")
+            return
+        if len(upload.parts) < 2:
+            await self.send_message(chat_id, "Нужно минимум 2 части. Или отправь одним файлом до 20 MB.")
+            self.part_uploads[user_id] = upload
+            return
+
+        self.busy.add(user_id)
+        status = await self.send_message(
+            chat_id,
+            f"🔗 Склеиваю {len(upload.parts)} частей… потом распознаю речь (1–3 мин).",
+        )
+        status_id = status["message_id"]
+        merged = upload.work_dir / "merged.mp4"
+        try:
+            await asyncio.to_thread(merge_video_parts, upload.parts, merged)
+            await self._process_downloaded_video(chat_id, user_id, merged, upload.work_dir, status_id)
+        except Exception as exc:
+            logger.exception("Merge failed")
+            await self.edit_message(chat_id, status_id, f"⚠️ Ошибка склейки: {exc}")
+            shutil.rmtree(upload.work_dir, ignore_errors=True)
+        finally:
+            self.busy.discard(user_id)
+
+    async def _process_downloaded_video(
+        self, chat_id: int, user_id: int, input_path: Path, work_dir: Path, status_id: int
+    ) -> None:
+        try:
+            segments = await asyncio.to_thread(prepare_segments, self.ai_client, input_path)
+            prefs = get_prefs(user_id)
+            session = Session(
+                video_path=input_path,
+                work_dir=work_dir,
+                segments=segments,
+                style=prefs["style"] if prefs["style"] in STYLES else DEFAULT_STYLE,
+                font=prefs["font"] if prefs["font"] in FONTS else DEFAULT_FONT,
+                position=prefs["position"] if prefs["position"] in POSITIONS else DEFAULT_POSITION,
+                color=prefs["color"] if prefs["color"] in COLORS else DEFAULT_COLOR,
+                size=prefs["size"] if prefs["size"] in SIZES else DEFAULT_SIZE,
+            )
+            self.sessions[user_id] = session
+            log_event(user_id, "upload")
+            size_mb = input_path.stat().st_size // (1024 * 1024)
+            await self.edit_message(
+                chat_id, status_id, f"✅ Видео готово ({size_mb} MB)! Текст распознан. Настрой субтитры 👇"
+            )
+            await self._send_control_panel(chat_id, session)
+        except VideoProcessingError as exc:
+            logger.exception("Prepare failed")
+            await self.edit_message(chat_id, status_id, f"⚠️ {exc}")
+            shutil.rmtree(work_dir, ignore_errors=True)
+        except Exception as exc:
+            logger.exception("Unexpected error")
+            await self.edit_message(chat_id, status_id, f"⚠️ Что-то пошло не так: {exc}")
+            shutil.rmtree(work_dir, ignore_errors=True)
+
     async def _handle_video(self, chat_id, user_id, video, document) -> None:
         if not can_process_video(user_id, self.settings.free_video_limit):
             await self.send_message(
@@ -593,11 +785,20 @@ class TelegramBot:
             file_name = document.get("file_name") or file_name
             file_size = document.get("file_size") or 0
 
-        if file_size > MAX_VIDEO_SIZE_MB * 1024 * 1024:
-            await self.send_message(chat_id, f"Видео слишком большое. Максимум {MAX_VIDEO_SIZE_MB} MB.")
+        limit_mb = self.settings.max_video_size_mb
+        if file_size > limit_mb * 1024 * 1024:
+            size_mb = file_size // (1024 * 1024)
+            n = self._parts_needed(file_size, limit_mb)
+            await self.send_message(
+                chat_id,
+                f"📦 Видео {size_mb} MB — Telegram не даёт скачать больше {limit_mb} MB за раз.\n\n"
+                f"Разбей на **{n} частей** по ~{limit_mb - 1} MB и отправь через /big\n\n"
+                "Как разбить: /help big",
+            )
             return
 
         self._cleanup_session(user_id)
+        self._cleanup_parts(user_id)
         self.busy.add(user_id)
         status = await self.send_message(chat_id, "📥 Принял видео. Распознаю речь… 30–90 сек.")
         status_id = status["message_id"]
@@ -606,31 +807,10 @@ class TelegramBot:
 
         try:
             await self.download_file(file_id, input_path)
-            segments = await asyncio.to_thread(prepare_segments, self.ai_client, input_path)
-
-            prefs = get_prefs(user_id)
-            session = Session(
-                video_path=input_path,
-                work_dir=work_dir,
-                segments=segments,
-                style=prefs["style"] if prefs["style"] in STYLES else DEFAULT_STYLE,
-                font=prefs["font"] if prefs["font"] in FONTS else DEFAULT_FONT,
-                position=prefs["position"] if prefs["position"] in POSITIONS else DEFAULT_POSITION,
-                color=prefs["color"] if prefs["color"] in COLORS else DEFAULT_COLOR,
-                size=prefs["size"] if prefs["size"] in SIZES else DEFAULT_SIZE,
-            )
-            self.sessions[user_id] = session
-            log_event(user_id, "upload")
-
-            await self.edit_message(chat_id, status_id, "✅ Текст распознан! Настрой субтитры 👇")
-            await self._send_control_panel(chat_id, session)
-        except VideoProcessingError as exc:
-            logger.exception("Prepare failed")
-            await self.edit_message(chat_id, status_id, f"⚠️ {exc}")
-            shutil.rmtree(work_dir, ignore_errors=True)
+            await self._process_downloaded_video(chat_id, user_id, input_path, work_dir, status_id)
         except Exception as exc:
-            logger.exception("Unexpected error")
-            await self.edit_message(chat_id, status_id, f"⚠️ Что-то пошло не так: {exc}")
+            logger.exception("Download failed")
+            await self.edit_message(chat_id, status_id, f"⚠️ Не удалось скачать: {exc}")
             shutil.rmtree(work_dir, ignore_errors=True)
         finally:
             self.busy.discard(user_id)
@@ -657,6 +837,15 @@ class TelegramBot:
         if data == "invite":
             await self.answer_callback(callback_id)
             await self._send_invite(chat_id, user_id)
+            return
+        if data == "parts:done":
+            await self.answer_callback(callback_id, "Склеиваю…")
+            await self._finish_parts(chat_id, user_id)
+            return
+        if data == "parts:cancel":
+            await self.answer_callback(callback_id, "Отменено")
+            self._cleanup_parts(user_id)
+            await self.send_message(chat_id, "❌ Загрузка частей отменена. Пришли обычное видео или /big")
             return
 
         session = self.sessions.get(user_id)
