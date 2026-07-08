@@ -23,6 +23,7 @@ from bot.db import (
     try_set_referrer,
 )
 from bot.telegram_files import download_telegram_file
+from bot.services.url_download import UrlDownloadError, download_video_url, extract_url
 from bot.services.pipeline import (
     VideoProcessingError,
     prepare_segments,
@@ -261,21 +262,22 @@ class TelegramBot:
         session.control_message_id = control["message_id"]
 
     def welcome_text(self) -> str:
-        lim = self.settings.max_video_size_mb
-        big_hint = ""
-        if self.settings.uses_local_api:
-            big_hint = f"\n📎 Большие видео (до {lim} MB) — отправляй как **файл**, не сжатое видео."
+        tg_lim = self.settings.max_video_size_mb
+        url_lim = self.settings.max_url_download_mb
         return (
             "👋 Привет! Я делаю видео с крутыми Reels-субтитрами.\n\n"
-            f"1️⃣ Пришли видео (до {lim} MB){big_hint}\n"
-            "2️⃣ Я распознаю речь\n"
-            "3️⃣ Выберешь стиль, шрифт, цвет, позицию\n"
-            "4️⃣ Поправишь слова при желании\n"
-            "5️⃣ Получишь готовое видео 🔥\n\n"
-            "✨ Умею: подсветку слов, авто-вертикаль, улучшение звука.\n"
-            f"🎁 Бесплатно: {self.settings.free_video_limit} видео на пробу.\n"
-            f"💎 Дальше PRO — {self.settings.price_rub}₽/мес (безлимит). Или зови друзей — дам ещё!\n\n"
-            "Пришли видео, чтобы начать 👇"
+            "📤 Как отправить видео:\n"
+            f"• Файлом в чат — до {tg_lim} MB (лучше как документ 📎)\n"
+            f"• Ссылкой — до {url_lim} MB (Google Drive, Яндекс.Диск, Dropbox)\n\n"
+            "⚙️ Что дальше:\n"
+            "1️⃣ Распознаю речь\n"
+            "2️⃣ Выбираешь стиль, шрифт, цвет\n"
+            "3️⃣ Поправляешь слова при желании\n"
+            "4️⃣ Получаешь готовое видео 🔥\n\n"
+            "✨ Подсветка слов, авто-вертикаль, чистый звук.\n"
+            f"🎁 Бесплатно: {self.settings.free_video_limit} видео.\n"
+            f"💎 PRO — {self.settings.price_rub}₽/мес безлимит. Или зови друзей!\n\n"
+            "Пришли видео или ссылку 👇"
         )
 
     # ---------- Sessions ----------
@@ -403,6 +405,10 @@ class TelegramBot:
             return
 
         if text and not text.startswith("/"):
+            url = extract_url(text)
+            if url:
+                await self._handle_url(chat_id, user_id, url)
+                return
             session = self.sessions.get(user_id)
             first_line = text.splitlines()[0] if text.splitlines() else ""
             if session and (session.awaiting_edit or PAIR_RE.match(first_line)):
@@ -412,7 +418,11 @@ class TelegramBot:
                 await self._send_control_panel(chat_id, session)
                 return
 
-        await self.send_message(chat_id, "Пришли видео — я сделаю Reels-субтитры 🎬")
+        await self.send_message(
+            chat_id,
+            "Пришли видео или ссылку на него 🎬\n"
+            "(Google Drive, Яндекс.Диск, Dropbox или прямая ссылка на mp4)",
+        )
 
     # ---------- Commands ----------
 
@@ -627,16 +637,14 @@ class TelegramBot:
         limit_mb = self.settings.max_video_size_mb
         if file_size > limit_mb * 1024 * 1024:
             size_mb = file_size // (1024 * 1024)
-            hint = ""
-            if not self.settings.uses_local_api:
-                hint = (
-                    f"\n\nСейчас лимит {limit_mb} MB (стандартный Telegram).\n"
-                    "Для видео до 200 MB–1 GB добавь в Railway:\n"
-                    "TELEGRAM_API_ID и TELEGRAM_API_HASH (взять на my.telegram.org)"
-                )
+            url_lim = self.settings.max_url_download_mb
             await self.send_message(
                 chat_id,
-                f"Видео {size_mb} MB — больше лимита ({limit_mb} MB).{hint}",
+                f"Видео {size_mb} MB — Telegram не даёт боту скачать больше {limit_mb} MB.\n\n"
+                f"🔗 Обход (до {url_lim} MB):\n"
+                "1. Залей на Google Drive или Яндекс.Диск\n"
+                "2. Открой доступ «всем по ссылке»\n"
+                "3. Пришли ссылку сюда — я скачаю сам",
             )
             return
 
@@ -655,6 +663,46 @@ class TelegramBot:
             await self._process_downloaded_video(chat_id, user_id, input_path, work_dir, status_id)
         except Exception as exc:
             logger.exception("Download failed")
+            await self.edit_message(chat_id, status_id, f"⚠️ Не удалось скачать: {exc}")
+            shutil.rmtree(work_dir, ignore_errors=True)
+        finally:
+            self.busy.discard(user_id)
+
+    async def _handle_url(self, chat_id: int, user_id: int, url: str) -> None:
+        if not can_process_video(user_id, self.settings.free_video_limit):
+            await self.send_message(
+                chat_id,
+                "😔 Бесплатные видео закончились.\n\n"
+                f"💎 PRO — {self.settings.price_rub}₽/мес, безлимит: /buy",
+                reply_markup=self._buy_keyboard(),
+            )
+            return
+
+        if user_id in self.busy:
+            await self.send_message(chat_id, "⏳ Уже обрабатываю видео, подожди.")
+            return
+
+        self._cleanup_session(user_id)
+        self.busy.add(user_id)
+        status = await self.send_message(chat_id, "🔗 Скачиваю видео по ссылке…")
+        status_id = status["message_id"]
+        work_dir = Path(tempfile.mkdtemp(prefix="reels-bot-url-"))
+        input_path = work_dir / "video.mp4"
+
+        try:
+            size = await asyncio.to_thread(
+                download_video_url, url, input_path, self.settings.max_url_download_mb
+            )
+            size_mb = max(size // (1024 * 1024), 1)
+            await self.edit_message(
+                chat_id, status_id, f"📥 Скачал ({size_mb} MB). Распознаю речь…"
+            )
+            await self._process_downloaded_video(chat_id, user_id, input_path, work_dir, status_id)
+        except UrlDownloadError as exc:
+            await self.edit_message(chat_id, status_id, f"⚠️ {exc}")
+            shutil.rmtree(work_dir, ignore_errors=True)
+        except Exception as exc:
+            logger.exception("URL download failed")
             await self.edit_message(chat_id, status_id, f"⚠️ Не удалось скачать: {exc}")
             shutil.rmtree(work_dir, ignore_errors=True)
         finally:

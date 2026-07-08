@@ -35,7 +35,7 @@ def _extract_audio(video_path: Path, audio_path: Path) -> None:
             "-acodec",
             "libmp3lame",
             "-q:a",
-            "4",
+            "2",
             str(audio_path),
         ],
         check=True,

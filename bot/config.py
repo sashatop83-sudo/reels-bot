@@ -22,6 +22,7 @@ class Settings:
     referral_bonus: int
     max_concurrent_renders: int
     max_video_size_mb: int
+    max_url_download_mb: int
     telegram_api_id: str
     telegram_api_hash: str
     telegram_api_url: str
@@ -70,6 +71,7 @@ def get_settings() -> Settings:
     cap = TELEGRAM_LOCAL_MAX_FILE_MB if api_url else TELEGRAM_MAX_FILE_MB
     default_mb = 200 if api_url else TELEGRAM_MAX_FILE_MB
     max_video = min(_int_env("MAX_VIDEO_SIZE_MB", default_mb), cap)
+    max_url = min(_int_env("MAX_URL_DOWNLOAD_MB", 1024), 2048)
 
     return Settings(
         telegram_bot_token=token,
@@ -81,6 +83,7 @@ def get_settings() -> Settings:
         referral_bonus=_int_env("REFERRAL_BONUS", 3),
         max_concurrent_renders=_int_env("MAX_CONCURRENT_RENDERS", 2),
         max_video_size_mb=max_video,
+        max_url_download_mb=max_url,
         telegram_api_id=api_id,
         telegram_api_hash=api_hash,
         telegram_api_url=api_url,
