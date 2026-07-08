@@ -4,6 +4,7 @@ from pathlib import Path
 
 from bot.services.ffmpeg_utils import (
     get_ffmpeg_binary,
+    get_media_duration,
     get_video_size,
     has_audio_stream,
 )
@@ -20,7 +21,6 @@ from bot.services.transcribe import SubtitleSegment
 
 TARGET_W = 1080
 TARGET_H = 1920
-VERTICAL_FIT_THRESHOLD = 0.65  # aspect w/h выше этого → добавляем вертикальный фон
 AUDIO_FILTER = "loudnorm=I=-16:TP=-1.5:LRA=11"
 
 
@@ -29,13 +29,25 @@ def _escape_filter_path(path: str) -> str:
 
 
 def _needs_vertical_fit(width: int, height: int) -> bool:
+    """9:16-обёртка только для горизонтального видео. Портрет не трогаем."""
     if height == 0:
         return False
-    return (width / height) > VERTICAL_FIT_THRESHOLD
+    return width > height * 1.05
+
+
+def _pick_preview_ts(segments: list[SubtitleSegment], video_path: Path) -> float:
+    duration = get_media_duration(str(video_path))
+    if not segments:
+        return min(0.5, max(duration * 0.25, 0.1))
+    pool = [s for s in segments if s.text.strip() and s.end <= duration * 0.9]
+    if not pool:
+        pool = segments
+    best = max(pool, key=lambda s: len(s.text))
+    ts = best.start + max((best.end - best.start) * 0.45, 0.2)
+    return min(max(ts, 0.1), max(duration - 0.2, 0.2))
 
 
 def _build_video_filter(ass_relpath: str, vertical_fit: bool) -> tuple[str, str, int, int]:
-    """Возвращает (filter_expr, mode, canvas_w, canvas_h). mode: 'vf' или 'complex'."""
     fonts_dir = _escape_filter_path(str(FONTS_DIR))
     ass_filter = f"ass={ass_relpath}:fontsdir={fonts_dir}"
 
@@ -44,7 +56,8 @@ def _build_video_filter(ass_relpath: str, vertical_fit: bool) -> tuple[str, str,
             f"[0:v]scale={TARGET_W}:{TARGET_H}:force_original_aspect_ratio=increase,"
             f"crop={TARGET_W}:{TARGET_H},boxblur=24:2,eq=brightness=-0.08[bg];"
             f"[0:v]scale={TARGET_W}:{TARGET_H}:force_original_aspect_ratio=decrease[fg];"
-            f"[bg][fg]overlay=(W-w)/2:(H-h)/2,{ass_filter}[v]"
+            f"[bg][fg]overlay=(W-w)/2:(H-h)/2[base];"
+            f"[base]{ass_filter}[v]"
         )
         return complex_filter, "complex", TARGET_W, TARGET_H
 
@@ -84,6 +97,17 @@ def _prepare(
     return filter_expr, mode, vertical_fit
 
 
+def _encode_args(output_name: str) -> list[str]:
+    return [
+        "-c:v", "libx264",
+        "-preset", "medium",
+        "-crf", "20",
+        "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart",
+        output_name,
+    ]
+
+
 def render_video_with_subtitles(
     video_path: Path,
     segments: list[SubtitleSegment],
@@ -112,22 +136,9 @@ def render_video_with_subtitles(
         args += ["-vf", filter_expr]
 
     if audio:
-        args += ["-af", AUDIO_FILTER, "-c:a", "aac"]
+        args += ["-af", AUDIO_FILTER, "-c:a", "aac", "-b:a", "192k"]
 
-    args += [
-        "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-crf",
-        "22",
-        "-pix_fmt",
-        "yuv420p",
-        "-movflags",
-        "+faststart",
-        output_path.name,
-    ]
-
+    args += _encode_args(output_path.name)
     _run_ffmpeg(args, work_dir)
     return output_path
 
@@ -142,7 +153,6 @@ def render_preview_image(
     color_key: str = DEFAULT_COLOR,
     size_key: str = DEFAULT_SIZE,
 ) -> Path:
-    """Один кадр с субтитрами — быстрый предпросмотр перед рендером."""
     ffmpeg_bin = get_ffmpeg_binary()
     work_dir = output_path.parent
 
@@ -150,16 +160,9 @@ def render_preview_image(
         video_path, segments, work_dir, style_key, font_key, position_key, color_key, size_key
     )
 
-    # берём момент, когда точно есть текст — середину первого сегмента
-    if segments:
-        first = segments[0]
-        ts = first.start + max((first.end - first.start) * 0.5, 0.2)
-    else:
-        ts = 0.5
-    ts = max(ts, 0.15)
+    ts = _pick_preview_ts(segments, work_dir / "input.mp4")
 
-    # -ss ПОСЛЕ -i (output seeking), чтобы тайминги субтитров совпадали с кадром
-    args = [ffmpeg_bin, "-y", "-i", "input.mp4", "-ss", f"{ts:.2f}"]
+    args = [ffmpeg_bin, "-y", "-ss", f"{ts:.3f}", "-i", "input.mp4"]
     if mode == "complex":
         args += ["-filter_complex", filter_expr, "-map", "[v]"]
     else:

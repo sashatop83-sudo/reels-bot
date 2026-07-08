@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import subprocess
@@ -46,7 +47,40 @@ def get_ffprobe_binary() -> str:
 
 
 def get_video_size(video_path: str) -> tuple[int, int]:
+    """Размер кадра с учётом rotation-метаданных (как видит зритель)."""
     ffprobe = get_ffprobe_binary()
+    try:
+        result = subprocess.run(
+            [
+                ffprobe,
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=width,height:stream_tags=rotate",
+                "-of",
+                "json",
+                video_path,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        data = json.loads(result.stdout or "{}")
+        streams = data.get("streams") or []
+        if not streams:
+            raise ValueError("no stream")
+        stream = streams[0]
+        width = int(stream.get("width") or 0)
+        height = int(stream.get("height") or 0)
+        rotate = stream.get("tags", {}).get("rotate", "0")
+        if rotate in ("90", "270", "-90"):
+            width, height = height, width
+        if width > 0 and height > 0:
+            return width, height
+    except Exception:
+        pass
+
     try:
         result = subprocess.run(
             [

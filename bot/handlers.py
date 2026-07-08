@@ -1,4 +1,5 @@
 import asyncio
+import html
 import json
 import logging
 import re
@@ -71,6 +72,7 @@ class Session:
     color: str = DEFAULT_COLOR
     size: str = DEFAULT_SIZE
     awaiting_edit: bool = False
+    awaiting_full_edit: bool = False
     counted: bool = False
     control_message_id: int | None = None
 
@@ -98,10 +100,14 @@ class TelegramBot:
                 raise RuntimeError(data.get("description", "Telegram API error"))
             return data["result"]
 
-    async def send_message(self, chat_id: int, text: str, reply_markup: dict | None = None):
+    async def send_message(
+        self, chat_id: int, text: str, reply_markup: dict | None = None, parse_mode: str | None = None
+    ):
         params = {"chat_id": chat_id, "text": text}
         if reply_markup:
             params["reply_markup"] = reply_markup
+        if parse_mode:
+            params["parse_mode"] = parse_mode
         return await self._api("sendMessage", **params)
 
     async def edit_message(self, chat_id, message_id, text, reply_markup=None):
@@ -144,7 +150,10 @@ class TelegramBot:
                 raise RuntimeError(payload.get("description", "Telegram API error"))
 
     async def send_video(self, chat_id, path, caption="", reply_markup=None):
-        await self._send_file("sendVideo", "video", chat_id, path, caption, reply_markup, "video/mp4")
+        # как документ — Telegram не пережимает и не ломает пропорции
+        await self._send_file(
+            "sendDocument", "document", chat_id, path, caption, reply_markup, "video/mp4"
+        )
 
     async def send_photo(self, chat_id, path, caption="", reply_markup=None):
         await self._send_file("sendPhoto", "photo", chat_id, path, caption, reply_markup, "image/png")
@@ -189,7 +198,7 @@ class TelegramBot:
                     {"text": f"🔠 {get_size(session.size).label}", "callback_data": "menu:size"},
                 ],
                 [
-                    {"text": "✏️ Текст", "callback_data": "edit"},
+                    {"text": "✏️ Править текст", "callback_data": "edit:copy"},
                 ],
                 [
                     {"text": "👁 Превью", "callback_data": "preview"},
@@ -229,6 +238,9 @@ class TelegramBot:
     def _clean(self, text: str) -> str:
         return text.replace("*", "")
 
+    def _editable_text(self, segments: list[SubtitleSegment]) -> str:
+        return "\n".join(self._clean(seg.text) for seg in segments if seg.text.strip())
+
     def _format_preview(self, segments: list[SubtitleSegment]) -> str:
         lines = [f"{i}. {self._clean(seg.text)}" for i, seg in enumerate(segments, 1)]
         text = "\n".join(lines)
@@ -246,8 +258,7 @@ class TelegramBot:
             f"🌈 Цвет: {get_color(session.color).label}\n"
             f"📍 Позиция: {get_position(session.position).label}\n"
             f"🔠 Размер: {get_size(session.size).label}\n\n"
-            "💡 Ошибка в тексте? Прямо напиши в чат: было = стало\n"
-            "(правки бесплатны, лимит не тратится)\n"
+            "✏️ Править текст → кнопка «Править текст» (скопируй, исправь, отправь)\n"
             "👁 Превью — кадр, 🎬 — готовое видео."
         )
 
@@ -356,6 +367,52 @@ class TelegramBot:
             session.segments[i].words = []
         return f"Текст обновлён ({count} строк)."
 
+    def _apply_full_edit(self, session: Session, text: str) -> str:
+        lines = [re.sub(r"^\s*\d+[\.\)]\s*", "", ln.strip()) for ln in text.splitlines()]
+        lines = [ln for ln in lines if ln]
+        if not lines:
+            return "Пусто. Скопируй текст из сообщения выше, исправь и отправь снова."
+
+        old = session.segments
+        if not old:
+            return "Нет текста для правки. Пришли видео заново."
+
+        total_start = old[0].start
+        total_end = old[-1].end
+        duration = max(total_end - total_start, 0.5)
+        step = duration / len(lines)
+
+        new_segments: list[SubtitleSegment] = []
+        for i, line in enumerate(lines):
+            start = total_start + i * step
+            end = total_start + (i + 1) * step if i < len(lines) - 1 else total_end
+            new_segments.append(SubtitleSegment(start=start, end=end, text=line, words=[]))
+
+        session.segments = new_segments
+        return (
+            f"✅ Текст обновлён ({len(lines)} строк).\n"
+            "Правки бесплатны. Жми 👁 Превью или 🎬 Сделать видео."
+        )
+
+    async def _send_editable_text(self, chat_id: int, session: Session) -> None:
+        body = self._editable_text(session.segments)
+        if not body:
+            await self.send_message(chat_id, "Текст пустой — нечего править.")
+            return
+        session.awaiting_full_edit = True
+        session.awaiting_edit = False
+        safe = html.escape(body)
+        await self.send_message(
+            chat_id,
+            "📋 <b>Текст для правки</b> (нажми на блок → Скопировать):\n\n"
+            f"<pre>{safe}</pre>\n\n"
+            "1. Скопируй весь текст из блока\n"
+            "2. Исправь слова где нужно\n"
+            "3. Отправь мне одним сообщением\n\n"
+            "✅ Правки бесплатны, лимит не тратится.",
+            parse_mode="HTML",
+        )
+
     # ---------- Dispatch ----------
 
     async def handle_update(self, update: dict) -> None:
@@ -411,6 +468,12 @@ class TelegramBot:
                 return
             session = self.sessions.get(user_id)
             first_line = text.splitlines()[0] if text.splitlines() else ""
+            if session and session.awaiting_full_edit:
+                result = self._apply_full_edit(session, text)
+                session.awaiting_full_edit = False
+                await self.send_message(chat_id, result)
+                await self._send_control_panel(chat_id, session)
+                return
             if session and (session.awaiting_edit or PAIR_RE.match(first_line)):
                 result = self._apply_edits(session, text)
                 session.awaiting_edit = False
@@ -776,18 +839,9 @@ class TelegramBot:
                 await self.edit_message(chat_id, message_id, self._main_text(session), self._main_keyboard(session))
                 return
 
-        if data == "edit":
-            session.awaiting_edit = True
-            await self.answer_callback(callback_id, "Жду исправление")
-            await self.send_message(
-                chat_id,
-                "✏️ Просто напиши в чат, что заменить:\n\n"
-                "   было = стало\n"
-                "   Пример: превет = привет\n\n"
-                "🔹 Можно несколько замен — каждую с новой строки\n"
-                "🔹 Строку целиком: 2 = новый текст\n\n"
-                "✅ Правки бесплатные — это то же видео, лимит не тратится.",
-            )
+        if data == "edit:copy":
+            await self.answer_callback(callback_id, "Текст ниже")
+            await self._send_editable_text(chat_id, session)
             return
 
         if data == "preview":
@@ -847,6 +901,7 @@ class TelegramBot:
             await self.delete_message(chat_id, status_id)
             caption = (
                 f"✅ Готово! {get_style(session.style).label} · {get_font(session.font).label}\n\n"
+                "Видео без сжатия — открой как файл.\n"
                 "Хочешь другой вариант — поменяй настройки ниже и жми «Сделать видео»."
             )
             # видео БЕЗ меню-кнопок (на видео они не редактируются)
