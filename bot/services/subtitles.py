@@ -183,8 +183,8 @@ DEFAULT_STYLE = "hormozi"
 
 PUNCH_CHUNK_SIZE = 2      # слов в кадре для панч-стиля
 KARAOKE_MAX_WORDS = 4     # слов в строке караоке
-KARAOKE_MAX_CHARS = 22
-LINE_MAX_CHARS = 24       # символов в строке line-режима
+KARAOKE_MAX_CHARS = 28
+LINE_MAX_CHARS = 30       # символов в строке line-режима (русский длиннее)
 LINE_MAX_DUR = 3.0        # макс длительность одной строки, сек
 
 

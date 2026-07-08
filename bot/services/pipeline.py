@@ -5,7 +5,6 @@ from pathlib import Path
 
 from bot.services.ffmpeg_utils import check_ffmpeg
 from bot.services.render_video import render_preview_image, render_video_with_subtitles
-from bot.services.style_text import style_subtitles
 from bot.services.transcribe import SubtitleSegment, transcribe_video
 
 
@@ -14,7 +13,7 @@ class VideoProcessingError(Exception):
 
 
 def prepare_segments(client, video_path: Path) -> list[SubtitleSegment]:
-    """Транскрибация + стилизация текста."""
+    """Транскрибация речи (без ИИ-переписывания — текст как в видео)."""
     check_ffmpeg()
 
     work_dir = Path(tempfile.mkdtemp(prefix="reels-bot-prep-"))
@@ -22,10 +21,6 @@ def prepare_segments(client, video_path: Path) -> list[SubtitleSegment]:
         segments = transcribe_video(client, video_path, work_dir)
         if not segments:
             raise VideoProcessingError("Не удалось распознать речь в видео")
-        try:
-            segments = style_subtitles(client, segments)
-        except Exception:
-            pass
         return segments
     except VideoProcessingError:
         raise

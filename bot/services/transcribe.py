@@ -68,12 +68,25 @@ def _parse_words(response) -> list[Word]:
 
 
 def _assign_words(segments: list[SubtitleSegment], words: list[Word]) -> None:
-    if not words:
+    if not words or not segments:
         return
     for segment in segments:
-        segment.words = [
-            w for w in words if w.start >= segment.start - 0.05 and w.start < segment.end + 0.05
-        ]
+        segment.words = []
+    for word in words:
+        mid = (word.start + word.end) / 2
+        target = None
+        for segment in segments:
+            if segment.start - 0.08 <= mid <= segment.end + 0.08:
+                target = segment
+                break
+        if target is None:
+            target = min(
+                segments,
+                key=lambda s: min(abs(mid - s.start), abs(mid - s.end)),
+            )
+        target.words.append(word)
+    for segment in segments:
+        segment.words.sort(key=lambda w: w.start)
 
 
 def _parse_segments(response, total_duration: float = 0.0) -> list[SubtitleSegment]:
@@ -113,6 +126,7 @@ def transcribe_video(client, video_path: Path, work_dir: Path) -> list[SubtitleS
             response = client.audio.transcriptions.create(
                 model=WHISPER_MODEL,
                 file=audio_file,
+                language="ru",
                 response_format="verbose_json",
                 timestamp_granularities=["segment", "word"],
             )
@@ -126,6 +140,7 @@ def transcribe_video(client, video_path: Path, work_dir: Path) -> list[SubtitleS
                 response = client.audio.transcriptions.create(
                     model=WHISPER_MODEL,
                     file=audio_file,
+                    language="ru",
                     response_format="verbose_json",
                 )
         except Exception:
@@ -137,6 +152,7 @@ def transcribe_video(client, video_path: Path, work_dir: Path) -> list[SubtitleS
             response = client.audio.transcriptions.create(
                 model=WHISPER_MODEL,
                 file=audio_file,
+                language="ru",
                 response_format="json",
             )
 

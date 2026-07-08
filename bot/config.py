@@ -7,8 +7,8 @@ from openai import OpenAI
 load_dotenv()
 
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
-# Telegram Bot API не даёт боту скачать файл больше 20 MB (без Local Bot API Server).
-TELEGRAM_MAX_FILE_MB = 20
+TELEGRAM_MAX_FILE_MB = 20          # без Local Bot API
+TELEGRAM_LOCAL_MAX_FILE_MB = 2000  # с Local Bot API
 
 
 @dataclass(frozen=True)
@@ -22,8 +22,15 @@ class Settings:
     referral_bonus: int
     max_concurrent_renders: int
     max_video_size_mb: int
+    telegram_api_id: str
+    telegram_api_hash: str
+    telegram_api_url: str
     payment_provider_token: str
     payment_info: str
+
+    @property
+    def uses_local_api(self) -> bool:
+        return bool(self.telegram_api_url.strip())
 
 
 def create_groq_client(api_key: str) -> OpenAI:
@@ -52,6 +59,18 @@ def get_settings() -> Settings:
     if not api_key:
         raise RuntimeError("GROQ_API_KEY is not set")
 
+    api_url = os.getenv("TELEGRAM_API_URL", "").strip()
+    api_id = os.getenv("TELEGRAM_API_ID", "").strip()
+    api_hash = os.getenv("TELEGRAM_API_HASH", "").strip()
+
+    # если есть ID/HASH но нет URL — start.sh поднимет local API на 8081
+    if not api_url and api_id and api_hash:
+        api_url = "http://127.0.0.1:8081"
+
+    cap = TELEGRAM_LOCAL_MAX_FILE_MB if api_url else TELEGRAM_MAX_FILE_MB
+    default_mb = 200 if api_url else TELEGRAM_MAX_FILE_MB
+    max_video = min(_int_env("MAX_VIDEO_SIZE_MB", default_mb), cap)
+
     return Settings(
         telegram_bot_token=token,
         groq_api_key=api_key,
@@ -61,7 +80,10 @@ def get_settings() -> Settings:
         sub_days=_int_env("SUB_DAYS", 30),
         referral_bonus=_int_env("REFERRAL_BONUS", 3),
         max_concurrent_renders=_int_env("MAX_CONCURRENT_RENDERS", 2),
-        max_video_size_mb=min(_int_env("MAX_VIDEO_SIZE_MB", TELEGRAM_MAX_FILE_MB), TELEGRAM_MAX_FILE_MB),
+        max_video_size_mb=max_video,
+        telegram_api_id=api_id,
+        telegram_api_hash=api_hash,
+        telegram_api_url=api_url,
         payment_provider_token=os.getenv("PAYMENT_PROVIDER_TOKEN", "").strip(),
         payment_info=os.getenv("PAYMENT_INFO", "").strip() or DEFAULT_PAYMENT_INFO,
     )
