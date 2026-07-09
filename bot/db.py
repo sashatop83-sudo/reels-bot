@@ -60,6 +60,14 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS start_guard (
+                user_id INTEGER PRIMARY KEY,
+                ts REAL NOT NULL
+            )
+            """
+        )
         conn.commit()
 
 
@@ -228,6 +236,34 @@ def get_stats() -> dict:
             "new_24h": new_24h,
             "pays": pays,
         }
+
+
+def try_start_welcome(user_id: int, cooldown: float = 10.0) -> bool:
+    """Не слать приветствие повторно, если /start пришёл дважды подряд."""
+    now = time.time()
+    conn = _connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT ts FROM start_guard WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        if row and now - row[0] < cooldown:
+            conn.rollback()
+            return False
+        conn.execute(
+            """
+            INSERT INTO start_guard (user_id, ts) VALUES (?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET ts = excluded.ts
+            """,
+            (user_id, now),
+        )
+        conn.commit()
+        return True
+    except Exception:
+        conn.rollback()
+        return True
+    finally:
+        conn.close()
 
 
 def claim_update(update_id: int) -> bool:

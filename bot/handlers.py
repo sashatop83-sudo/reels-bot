@@ -27,7 +27,9 @@ from bot.db import (
     save_prefs,
     set_premium,
     try_set_referrer,
+    try_start_welcome,
 )
+from bot.lock import acquire_polling_lock
 from bot.telegram_files import download_telegram_file
 from bot.services.payments import invoice_prices, yookassa_provider_data
 from bot.services.url_download import UrlDownloadError, download_video_url, extract_url_from_message
@@ -450,32 +452,33 @@ class TelegramBot:
         chat_id = message["chat"]["id"]
         user_id = message["from"]["id"]
         text = (message.get("text") or "").strip()
+        cmd = text.split()[0].split("@")[0].lower() if text else ""
 
-        if text.startswith("/start"):
+        if cmd == "/start":
             await self._handle_start(chat_id, user_id, text)
             return
-        if text.startswith("/help"):
+        if cmd == "/help":
             await self.send_message(chat_id, self.welcome_text())
             return
-        if text.startswith("/status"):
+        if cmd == "/status":
             await self.send_message(chat_id, self._status_text(user_id))
             return
-        if text.startswith("/buy"):
+        if cmd == "/buy":
             await self._send_invoice(chat_id, user_id)
             return
-        if text.startswith("/invite"):
+        if cmd == "/invite":
             await self._send_invite(chat_id, user_id)
             return
-        if text.startswith("/stats"):
+        if cmd == "/stats":
             await self._handle_stats(chat_id, user_id)
             return
-        if text.startswith("/users"):
+        if cmd == "/users":
             await self._handle_users(chat_id, user_id)
             return
-        if text.startswith("/grant"):
+        if cmd == "/grant":
             await self._handle_grant(chat_id, user_id, text)
             return
-        if text.startswith("/paycheck"):
+        if cmd == "/paycheck":
             await self._handle_paycheck(chat_id, user_id)
             return
 
@@ -523,6 +526,8 @@ class TelegramBot:
         )
 
     async def _handle_start(self, chat_id: int, user_id: int, text: str) -> None:
+        if not try_start_welcome(user_id):
+            return
         log_event(user_id, "start")
         parts = text.split(maxsplit=1)
         if len(parts) == 2 and parts[1].strip().isdigit():
@@ -1060,6 +1065,9 @@ class TelegramBot:
     # ---------- Poll ----------
 
     async def poll(self) -> None:
+        while not acquire_polling_lock():
+            logger.warning("Другая копия бота уже слушает Telegram — жду 5с…")
+            await asyncio.sleep(5)
         await self.set_commands()
         try:
             await self._api("deleteWebhook", drop_pending_updates=True)

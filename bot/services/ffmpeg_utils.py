@@ -104,26 +104,28 @@ def get_video_size(video_path: str) -> tuple[int, int]:
         return 1080, 1920
 
 
-def get_media_duration(path: str) -> float:
+def _probe_duration(path: str, args: list[str]) -> float:
     ffprobe = get_ffprobe_binary()
     try:
         result = subprocess.run(
-            [
-                ffprobe,
-                "-v",
-                "error",
-                "-show_entries",
-                "format=duration",
-                "-of",
-                "csv=p=0",
-                path,
-            ],
+            [ffprobe, "-v", "error", *args, "-of", "csv=p=0", path],
             capture_output=True,
             text=True,
         )
-        return float(result.stdout.strip())
+        value = float(result.stdout.strip())
+        return value if value > 0 else 0.0
     except Exception:
         return 0.0
+
+
+def get_media_duration(path: str) -> float:
+    """Максимальная длительность из контейнера и потоков — без обрезки хвоста видео."""
+    durations = [
+        _probe_duration(path, ["-show_entries", "format=duration"]),
+        _probe_duration(path, ["-select_streams", "v:0", "-show_entries", "stream=duration"]),
+        _probe_duration(path, ["-select_streams", "a:0", "-show_entries", "stream=duration"]),
+    ]
+    return max(durations) if durations else 0.0
 
 
 def has_audio_stream(video_path: str) -> bool:

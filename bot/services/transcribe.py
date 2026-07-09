@@ -48,7 +48,7 @@ def _extract_audio(video_path: Path, audio_path: Path) -> None:
             "-ac",
             "1",
             "-af",
-            "highpass=f=80,lowpass=f=9000,loudnorm=I=-16:TP=-1.5:LRA=11",
+            "highpass=f=80,lowpass=f=9000,volume=1.4",
             str(audio_path),
         ],
         check=True,
@@ -217,7 +217,8 @@ def transcribe_video(client, video_path: Path, work_dir: Path) -> list[SubtitleS
             )
 
     video_duration = get_media_duration(str(video_path))
-    target_duration = video_duration if video_duration > 0 else duration
+    audio_duration = duration
+    timeline = max(video_duration, audio_duration)
 
     words = _smooth_words(_parse_words(response))
     if words:
@@ -227,7 +228,7 @@ def transcribe_video(client, video_path: Path, work_dir: Path) -> list[SubtitleS
         for seg in segments:
             seg.words = _smooth_words(_synth_words(seg))
 
-    return align_segments_to_duration(segments, target_duration)
+    return align_segments_to_duration(segments, timeline, audio_duration=audio_duration)
 
 
 def _synth_words(segment: SubtitleSegment) -> list[Word]:
@@ -412,15 +413,17 @@ def align_segments_to_duration(
     segments: list[SubtitleSegment],
     duration: float,
     *,
+    audio_duration: float = 0.0,
     tolerance: float = 0.04,
 ) -> list[SubtitleSegment]:
-    """Подогнать тайминги, если речь длиннее видео (ускоренный ролик, рассинхрон)."""
+    """Сжать тайминги только если речь явно длиннее медиа (не по заниженному metadata)."""
     if not segments or duration <= 0:
         return segments
+    ref = max(duration, audio_duration or 0.0)
     last_end = max(seg.end for seg in segments)
     if last_end <= 0:
         return segments
-    if last_end <= duration * (1 + tolerance):
+    if last_end <= ref * (1 + tolerance):
         return segments
-    ratio = duration / last_end
+    ratio = ref / last_end
     return _scale_segments(segments, ratio)
