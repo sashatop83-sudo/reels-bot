@@ -17,7 +17,7 @@ from bot.services.subtitles import (
     FONTS_DIR,
     build_ass,
 )
-from bot.services.transcribe import SubtitleSegment
+from bot.services.transcribe import SubtitleSegment, align_segments_to_duration, collect_all_words
 
 TARGET_W = 1080
 TARGET_H = 1920
@@ -122,6 +122,10 @@ def _prepare(
     local_input = work_dir / "input.mp4"
     ass_path = work_dir / "subs.ass"
     shutil.copy2(video_path, local_input)
+
+    duration = get_media_duration(str(local_input))
+    if duration > 0:
+        segments = align_segments_to_duration(segments, duration)
 
     width, height = get_video_size(str(local_input))
     vertical_fit = _needs_vertical_fit(width, height)
@@ -230,7 +234,10 @@ def render_preview_image(
     ffmpeg_bin = get_ffmpeg_binary()
     work_dir = output_path.parent
 
-    ts = _pick_preview_ts(segments, work_dir / "input.mp4")
+    duration = get_media_duration(str(video_path))
+    if duration > 0:
+        segments = align_segments_to_duration(segments, duration)
+    ts = _pick_preview_ts(segments, video_path)
 
     filter_expr, mode, _ = _prepare(
         video_path, segments, work_dir, style_key, font_key, position_key, color_key, size_key,

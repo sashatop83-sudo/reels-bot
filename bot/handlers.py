@@ -56,7 +56,7 @@ from bot.services.subtitles import (
     get_size,
     get_style,
 )
-from bot.services.transcribe import SubtitleSegment
+from bot.services.transcribe import SubtitleSegment, rebuild_segments_from_lines, update_segment_words
 
 logger = logging.getLogger(__name__)
 
@@ -315,15 +315,27 @@ class TelegramBot:
         pattern = re.compile(rf"(?<!\w){re.escape(find)}(?!\w)", re.IGNORECASE | re.UNICODE)
         total = 0
         for seg in session.segments:
-            new_text, n = pattern.subn(repl, seg.text)
-            if n:
-                seg.text, seg.words = new_text, []
-                total += n
+            if seg.words:
+                changed = False
+                for word in seg.words:
+                    new_t, n = pattern.subn(repl, word.text)
+                    if n:
+                        word.text = new_t
+                        changed = True
+                        total += n
+                if changed:
+                    seg.text = " ".join(w.text for w in seg.words)
+            else:
+                new_text, n = pattern.subn(repl, seg.text)
+                if n:
+                    seg.text = new_text
+                    update_segment_words(seg)
+                    total += n
         if total == 0:
             for seg in session.segments:
                 if find.lower() in seg.text.lower():
                     seg.text = re.sub(re.escape(find), repl, seg.text, flags=re.IGNORECASE)
-                    seg.words = []
+                    update_segment_words(seg)
                     total += 1
         return total
 
@@ -358,8 +370,9 @@ class TelegramBot:
             changed = 0
             for idx, new_text in line_edits.items():
                 if 1 <= idx <= len(session.segments):
-                    session.segments[idx - 1].text = new_text
-                    session.segments[idx - 1].words = []
+                    seg = session.segments[idx - 1]
+                    seg.text = new_text
+                    update_segment_words(seg, new_text)
                     changed += 1
             if not replaced and not changed:
                 return "Не нашёл что заменить. Проверь слово и пришли ещё раз."
@@ -376,8 +389,7 @@ class TelegramBot:
             return "Не понял правки. Пришли «слово = правильное» или весь текст списком."
         count = min(len(cleaned), len(session.segments))
         for i in range(count):
-            session.segments[i].text = cleaned[i]
-            session.segments[i].words = []
+            update_segment_words(session.segments[i], cleaned[i])
         return f"Текст обновлён ({count} строк)."
 
     def _apply_full_edit(self, session: Session, text: str) -> str:
@@ -390,18 +402,7 @@ class TelegramBot:
         if not old:
             return "Нет текста для правки. Пришли видео заново."
 
-        total_start = old[0].start
-        total_end = old[-1].end
-        duration = max(total_end - total_start, 0.5)
-        step = duration / len(lines)
-
-        new_segments: list[SubtitleSegment] = []
-        for i, line in enumerate(lines):
-            start = total_start + i * step
-            end = total_start + (i + 1) * step if i < len(lines) - 1 else total_end
-            new_segments.append(SubtitleSegment(start=start, end=end, text=line, words=[]))
-
-        session.segments = new_segments
+        session.segments = rebuild_segments_from_lines(old, lines)
         return (
             f"✅ Текст обновлён ({len(lines)} строк).\n"
             "Правки бесплатны. Жми 👁 Превью или 🎬 Сделать видео."

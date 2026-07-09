@@ -236,22 +236,17 @@ def _escape_word(text: str) -> str:
 
 
 def _synth_words(segment: SubtitleSegment) -> list[Word]:
+    from bot.services.transcribe import _map_token_times
+
     tokens = [t for t in segment.text.split() if t]
     if not tokens:
         return []
-    duration = max(segment.end - segment.start, 0.4)
-    step = duration / len(tokens)
-    return [
-        Word(text=tok, start=segment.start + i * step, end=segment.start + (i + 1) * step)
-        for i, tok in enumerate(tokens)
-    ]
+    times = _map_token_times(tokens, [], segment.start, segment.end)
+    return [Word(text=tok, start=s, end=e) for tok, (s, e) in zip(tokens, times)]
 
 
 def _all_words(segments: list[SubtitleSegment]) -> list[Word]:
-    words: list[Word] = []
-    for segment in segments:
-        words.extend(segment.words or _synth_words(segment))
-    return words
+    return collect_all_words(segments)
 
 
 def _group_words(words: list[Word], max_words: int, max_chars: int, max_dur: float) -> list[list[Word]]:
@@ -480,6 +475,12 @@ def _build_preview(
     """Один яркий кадр для превью — короткая строка, хорошо читается."""
     highlight = accent or style.highlight or style.primary
     raw = _preview_text_at_time(style, segments, preview_ts)
+    if not raw:
+        for segment in segments:
+            tokens = [t for t in segment.text.split() if t]
+            if tokens:
+                raw = " ".join(tokens[:KARAOKE_MAX_WORDS])
+                break
     text = _escape(raw)
     if not text:
         return []
@@ -489,9 +490,8 @@ def _build_preview(
         f"{{\\bord8\\shad4\\3c{BLACK}\\4c&HA0000000}}"
         f"{{\\c{WHITE}}}{{\\1c{highlight}}}{text}"
     )
-    start = max(0.0, preview_ts - 2.0)
-    end = preview_ts + 8.0
-    return [_dialogue(start, end, body)]
+    # ffmpeg -ss до -i: таймлайн кадра с 0 — субтитр всегда на 0, без fade
+    return [_dialogue(0.0, 10.0, body, fade_ms=0)]
 
 
 def build_ass(
