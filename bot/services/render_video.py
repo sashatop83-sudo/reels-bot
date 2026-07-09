@@ -21,7 +21,30 @@ from bot.services.transcribe import SubtitleSegment
 
 TARGET_W = 1080
 TARGET_H = 1920
-MAX_SIDE = 1920  # не грузим Railway 4K-энкодом
+MAX_SIDE = 1080          # всегда 1080p макс — меньше RAM на Railway
+ULTRA_MAX_SIDE = 720       # запасной режим для тяжёлых файлов
+LARGE_FILE_MB = 60         # с этого размера — облегчённый рендер
+
+
+def _file_size_mb(path: Path) -> int:
+    try:
+        return path.stat().st_size // (1024 * 1024)
+    except OSError:
+        return 0
+
+
+def _is_large_video(path: Path) -> bool:
+    return _file_size_mb(path) >= LARGE_FILE_MB
+
+
+def _link_input(video_path: Path, local_input: Path) -> None:
+    """Не копировать 160MB+ — симлинк экономит диск и время."""
+    if local_input.exists() or local_input.is_symlink():
+        local_input.unlink()
+    try:
+        local_input.symlink_to(video_path.resolve())
+    except OSError:
+        shutil.copy2(video_path, local_input)
 
 
 def _escape_filter_path(path: str) -> str:
@@ -46,22 +69,38 @@ def _pick_preview_ts(segments: list[SubtitleSegment], video_path: Path) -> float
     return min(max(ts, 0.1), max(duration - 0.2, 0.2))
 
 
-def _scale_down_filter(width: int, height: int) -> str:
-    """Уменьшить 4K → 1080p, чтобы не убить память на Railway."""
-    if max(width, height) <= MAX_SIDE:
+def _scale_down_filter(width: int, height: int, max_side: int = MAX_SIDE) -> str:
+    """Уменьшить до max_side по длинной стороне."""
+    if max(width, height) <= max_side:
         return ""
     return (
-        "scale=w='if(gt(iw,ih),min(1920,iw),-2)'"
-        ":h='if(gt(ih,iw),min(1920,ih),-2)'"
+        f"scale=w='if(gt(iw,ih),min({max_side},iw),-2)'"
+        f":h='if(gt(ih,iw),min({max_side},ih),-2)'"
     )
 
 
 def _build_video_filter(
-    ass_relpath: str, vertical_fit: bool, width: int, height: int
+    ass_relpath: str,
+    vertical_fit: bool,
+    width: int,
+    height: int,
+    *,
+    memory_safe: bool = False,
+    ultra: bool = False,
 ) -> tuple[str, str, int, int]:
     fonts_dir = _escape_filter_path(str(FONTS_DIR))
     ass_filter = f"ass={ass_relpath}:fontsdir={fonts_dir}"
-    downscale = _scale_down_filter(width, height)
+    cap = ULTRA_MAX_SIDE if ultra else MAX_SIDE
+    downscale = _scale_down_filter(width, height, cap)
+
+    # Тяжёлые файлы: без boxblur/overlay (жрёт RAM), просто pad
+    if vertical_fit and memory_safe:
+        vf = (
+            f"scale={TARGET_W}:{TARGET_H}:force_original_aspect_ratio=decrease,"
+            f"pad={TARGET_W}:{TARGET_H}:(ow-iw)/2:(oh-ih)/2:color=black,"
+            f"{ass_filter}"
+        )
+        return vf, "vf", TARGET_W, TARGET_H
 
     if vertical_fit:
         parts = [
@@ -75,13 +114,13 @@ def _build_video_filter(
 
     if downscale:
         vf = f"{downscale},{ass_filter}"
-        new_w = width if width <= height else min(width, MAX_SIDE)
-        new_h = height if height <= width else min(height, MAX_SIDE)
-        if width > height:
-            new_w, new_h = MAX_SIDE, int(height * MAX_SIDE / width)
+        if width >= height:
+            new_w = min(width, cap)
+            new_h = int(height * new_w / width) if width else cap
         else:
-            new_h, new_w = MAX_SIDE, int(width * MAX_SIDE / height)
-        return vf, "vf", new_w, new_h
+            new_h = min(height, cap)
+            new_w = int(width * new_h / height) if height else cap
+        return vf, "vf", max(new_w, 2), max(new_h, 2)
 
     return ass_filter, "vf", width, height
 
@@ -91,7 +130,10 @@ def _ffmpeg_error(stderr: str, returncode: int) -> str:
     if returncode < 0:
         sig = -returncode
         if sig == 9:
-            return "Серверу не хватило памяти при рендере. Попробуй видео покороче или меньше по разрешению."
+            return (
+                "Серверу не хватило памяти при рендере. "
+                "Попробуй видео до 3 мин или отправь ссылкой — бот сам сожмёт до 1080p."
+            )
         return f"FFmpeg остановлен сигналом {sig}."
     for line in text.splitlines():
         low = line.lower()
@@ -118,15 +160,18 @@ def _prepare(
     size_key: str,
     for_preview: bool = False,
     preview_ts: float = 0.0,
+    *,
+    memory_safe: bool = False,
+    ultra: bool = False,
 ) -> tuple[str, str, bool]:
     local_input = work_dir / "input.mp4"
     ass_path = work_dir / "subs.ass"
-    shutil.copy2(video_path, local_input)
+    _link_input(video_path, local_input)
 
     width, height = get_video_size(str(local_input))
     vertical_fit = _needs_vertical_fit(width, height)
     filter_expr, mode, canvas_w, canvas_h = _build_video_filter(
-        "subs.ass", vertical_fit, width, height
+        "subs.ass", vertical_fit, width, height, memory_safe=memory_safe, ultra=ultra
     )
 
     ass_text = build_ass(
@@ -137,16 +182,27 @@ def _prepare(
     return filter_expr, mode, vertical_fit
 
 
-def _encode_args(output_name: str, lite: bool = False) -> list[str]:
+def _encode_args(output_name: str, *, lite: bool = False, ultra: bool = False) -> list[str]:
+    if ultra:
+        return [
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-crf", "24",
+            "-threads", "1",
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+            "-max_muxing_queue_size", "8192",
+            output_name,
+        ]
     if lite:
         return [
             "-c:v", "libx264",
             "-preset", "veryfast",
             "-crf", "23",
-            "-threads", "2",
+            "-threads", "1",
             "-pix_fmt", "yuv420p",
             "-movflags", "+faststart",
-            "-max_muxing_queue_size", "4096",
+            "-max_muxing_queue_size", "8192",
             output_name,
         ]
     return [
@@ -156,7 +212,7 @@ def _encode_args(output_name: str, lite: bool = False) -> list[str]:
         "-threads", "2",
         "-pix_fmt", "yuv420p",
         "-movflags", "+faststart",
-        "-max_muxing_queue_size", "4096",
+        "-max_muxing_queue_size", "8192",
         output_name,
     ]
 
@@ -166,7 +222,9 @@ def _build_render_command(
     filter_expr: str,
     mode: str,
     output_name: str,
-    lite: bool,
+    *,
+    lite: bool = False,
+    ultra: bool = False,
 ) -> list[str]:
     ffmpeg_bin = get_ffmpeg_binary()
     audio = has_audio_stream(str(work_dir / "input.mp4"))
@@ -179,12 +237,12 @@ def _build_render_command(
 
     if audio:
         args += ["-map", "0:a?"]
-        if lite:
-            args += ["-c:a", "aac", "-b:a", "128k"]
+        if ultra or lite:
+            args += ["-c:a", "aac", "-b:a", "96k"]
         else:
             args += ["-af", "dynaudnorm", "-c:a", "aac", "-b:a", "128k"]
 
-    args += _encode_args(output_name, lite=lite)
+    args += _encode_args(output_name, lite=lite, ultra=ultra)
     return args
 
 
@@ -199,20 +257,28 @@ def render_video_with_subtitles(
     size_key: str = DEFAULT_SIZE,
 ) -> Path:
     work_dir = output_path.parent
-    filter_expr, mode, _ = _prepare(
-        video_path, segments, work_dir, style_key, font_key, position_key, color_key, size_key
-    )
+    large = _is_large_video(video_path)
+
+    attempts: list[tuple[str, bool, bool]] = []
+    if large:
+        attempts = [("lite", True, False), ("ultra", True, True)]
+    else:
+        attempts = [("normal", False, False), ("lite", True, False), ("ultra", True, True)]
 
     last_err: Exception | None = None
-    for lite in (False, True):
+    for _name, memory_safe, ultra in attempts:
         try:
-            args = _build_render_command(work_dir, filter_expr, mode, output_path.name, lite=lite)
+            filter_expr, mode, _ = _prepare(
+                video_path, segments, work_dir, style_key, font_key, position_key, color_key, size_key,
+                memory_safe=memory_safe, ultra=ultra,
+            )
+            args = _build_render_command(
+                work_dir, filter_expr, mode, output_path.name, lite=memory_safe, ultra=ultra
+            )
             _run_ffmpeg(args, work_dir)
             return output_path
         except RuntimeError as exc:
             last_err = exc
-            if lite:
-                break
 
     raise RuntimeError(str(last_err) if last_err else "Ошибка рендера")
 
@@ -234,7 +300,7 @@ def render_preview_image(
 
     filter_expr, mode, _ = _prepare(
         video_path, segments, work_dir, style_key, font_key, position_key, color_key, size_key,
-        for_preview=True, preview_ts=ts,
+        for_preview=True, preview_ts=ts, memory_safe=_is_large_video(video_path),
     )
 
     args = [ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error", "-ss", f"{ts:.3f}", "-i", "input.mp4"]

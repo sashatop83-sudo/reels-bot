@@ -87,7 +87,7 @@ def get_settings() -> Settings:
         price_rub=_int_env("PRICE_RUB", 99),
         sub_days=_int_env("SUB_DAYS", 30),
         referral_bonus=_int_env("REFERRAL_BONUS", 3),
-        max_concurrent_renders=_int_env("MAX_CONCURRENT_RENDERS", 2),
+        max_concurrent_renders=_int_env("MAX_CONCURRENT_RENDERS", 1),
         max_video_size_mb=max_video,
         max_url_download_mb=max_url,
         telegram_api_id=api_id,
