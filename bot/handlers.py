@@ -15,7 +15,7 @@ from bot.config import Settings, create_groq_client
 from bot.db import (
     add_bonus,
     can_process_video,
-    claim_message,
+    claim_update,
     get_prefs,
     get_recent_users,
     get_stats,
@@ -27,9 +27,7 @@ from bot.db import (
     save_prefs,
     set_premium,
     try_set_referrer,
-    try_start_welcome,
 )
-from bot.lock import acquire_polling_lock
 from bot.telegram_files import download_telegram_file
 from bot.services.payments import invoice_prices, yookassa_provider_data
 from bot.services.url_download import UrlDownloadError, download_video_url, extract_url_from_message
@@ -451,10 +449,6 @@ class TelegramBot:
 
         chat_id = message["chat"]["id"]
         user_id = message["from"]["id"]
-        msg_id = message.get("message_id")
-        if msg_id is not None and not claim_message(chat_id, msg_id):
-            return
-
         text = (message.get("text") or "").strip()
         cmd = text.split()[0].split("@")[0].lower() if text else ""
 
@@ -530,8 +524,6 @@ class TelegramBot:
         )
 
     async def _handle_start(self, chat_id: int, user_id: int, text: str) -> None:
-        if not try_start_welcome(user_id):
-            return
         log_event(user_id, "start")
         parts = text.split(maxsplit=1)
         if len(parts) == 2 and parts[1].strip().isdigit():
@@ -1069,9 +1061,6 @@ class TelegramBot:
     # ---------- Poll ----------
 
     async def poll(self) -> None:
-        while not acquire_polling_lock():
-            logger.warning("Другая копия бота уже слушает Telegram — жду 5с…")
-            await asyncio.sleep(5)
         await self.set_commands()
         try:
             await self._api("deleteWebhook", drop_pending_updates=True)
@@ -1101,7 +1090,10 @@ class TelegramBot:
                     self.offset = uid + 1
                     if not claim_update(uid):
                         continue
-                    await self.handle_update(update)
+                    try:
+                        await self.handle_update(update)
+                    except Exception:
+                        logger.exception("handle_update failed for %s", uid)
                 if updates:
                     save_poll_offset(self.offset)
             except Exception:
