@@ -419,16 +419,47 @@ def _build_line(style: SubtitleStyle, segments: list[SubtitleSegment], accent: s
     return lines
 
 
-def _text_at_time(segments: list[SubtitleSegment], ts: float) -> str:
-    for segment in segments:
-        if segment.start - 0.15 <= ts <= segment.end + 0.35 and segment.text.strip():
-            return segment.text
+def _preview_text_at_time(style: SubtitleStyle, segments: list[SubtitleSegment], ts: float) -> str:
+    """Одна короткая строка для превью — как в видео (2–4 слова), не весь текст."""
     words = _all_words(segments)
-    for group in _group_words(words, KARAOKE_MAX_WORDS, KARAOKE_MAX_CHARS, LINE_MAX_DUR):
-        if group[0].start - 0.15 <= ts <= group[-1].end + 0.35:
-            return " ".join(w.text for w in group)
-    if segments:
-        return max(segments, key=lambda s: len(s.text)).text
+
+    if style.mode == "punch" and words:
+        for i, word in enumerate(words):
+            if word.start - 0.15 <= ts <= word.end + 0.35:
+                chunk = words[i : i + PUNCH_CHUNK_SIZE]
+                return " ".join(w.text for w in chunk)
+        nearest = min(words, key=lambda w: abs((w.start + w.end) / 2 - ts))
+        idx = words.index(nearest)
+        chunk = words[idx : idx + PUNCH_CHUNK_SIZE]
+        return " ".join(w.text for w in chunk)
+
+    if style.mode == "karaoke" and words:
+        groups = _group_words(words, KARAOKE_MAX_WORDS, KARAOKE_MAX_CHARS, LINE_MAX_DUR)
+        for group in groups:
+            if group[0].start - 0.15 <= ts <= group[-1].end + 0.35:
+                return " ".join(w.text for w in group)
+        if groups:
+            nearest = min(
+                groups,
+                key=lambda g: abs((g[0].start + g[-1].end) / 2 - ts),
+            )
+            return " ".join(w.text for w in nearest)
+
+    for segment in segments:
+        for start, end, chunk_text in _split_text_timed(segment, LINE_MAX_CHARS):
+            if start - 0.15 <= ts <= end + 0.35 and chunk_text.strip():
+                return chunk_text
+
+    if words:
+        for group in _group_words(words, KARAOKE_MAX_WORDS, KARAOKE_MAX_CHARS, LINE_MAX_DUR):
+            if group[0].start - 0.15 <= ts <= group[-1].end + 0.35:
+                return " ".join(w.text for w in group)
+        return " ".join(w.text for w in words[:KARAOKE_MAX_WORDS])
+
+    for segment in segments:
+        if segment.text.strip():
+            tokens = segment.text.split()
+            return " ".join(tokens[:KARAOKE_MAX_WORDS])
     return ""
 
 
@@ -438,16 +469,16 @@ def _build_preview(
     accent: str | None,
     preview_ts: float,
 ) -> list[str]:
-    """Один яркий кадр для превью — без полупрозрачного караоке."""
+    """Один яркий кадр для превью — короткая строка, хорошо читается."""
     highlight = accent or style.highlight or style.primary
-    raw = _text_at_time(segments, preview_ts)
+    raw = _preview_text_at_time(style, segments, preview_ts)
     text = _escape(raw)
     if not text:
         return []
     if style.uppercase:
         text = text.upper()
     body = (
-        f"{{\\bord9\\shad5\\3c{BLACK}\\4c&HA0000000}}"
+        f"{{\\bord8\\shad4\\3c{BLACK}\\4c&HA0000000}}"
         f"{{\\c{WHITE}}}{{\\1c{highlight}}}{text}"
     )
     start = max(0.0, preview_ts - 2.0)
@@ -473,11 +504,9 @@ def build_ass(
     accent = get_color(color_key).value
     size_mult = get_size(size_key).mult
     if for_preview:
-        size_mult *= 1.35
-        header = _header(style, font, position, width, height, size_mult, outline_override=9)
+        size_mult *= 1.15
+        header = _header(style, font, position, width, height, size_mult, outline_override=8)
         events = _build_preview(style, segments, accent, preview_ts)
-        if not events:
-            events = _build_line(style, segments, accent)
         return header + "".join(events)
 
     header = _header(style, font, position, width, height, size_mult)
