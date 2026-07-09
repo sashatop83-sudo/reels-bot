@@ -1,21 +1,19 @@
-"""Скачивание видео по ссылке — обход лимита Telegram 20 MB."""
+"""Скачивание видео по ссылке — Google Drive, Яндекс.Диск, Dropbox."""
 
 from __future__ import annotations
 
 import re
 from pathlib import Path
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import parse_qs, urlparse, urlunparse
 
 import httpx
 
 VIDEO_SUFFIXES = (".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi")
-VIDEO_MIMES = ("video/", "application/octet-stream")
 URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
+UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
 GDRIVE_FILE_RE = re.compile(r"drive\.google\.com/file/d/([a-zA-Z0-9_-]+)")
-GDRIVE_OPEN_RE = re.compile(r"drive\.google\.com/(?:open|uc)\?[^#]*[?&]id=([a-zA-Z0-9_-]+)")
 GDRIVE_ID_RE = re.compile(r"[?&]id=([a-zA-Z0-9_-]+)")
-YANDEX_PUBLIC_RE = re.compile(r"(?:disk\.yandex\.(?:ru|com)|yadi\.sk)/(?:i|d)/([a-zA-Z0-9_-]+)")
 
 
 class UrlDownloadError(Exception):
@@ -30,7 +28,6 @@ def extract_url(text: str) -> str | None:
 
 
 def extract_url_from_message(text: str, entities: list | None) -> str | None:
-    """URL из текста или из entities Telegram (когда ссылка кликабельная)."""
     found = extract_url(text or "")
     if found:
         return found
@@ -48,168 +45,241 @@ def extract_url_from_message(text: str, entities: list | None) -> str | None:
     return None
 
 
+def _clean_share_url(url: str) -> str:
+    parsed = urlparse(url.strip())
+    # убираем utm и прочий мусор — API Яндекса/GDrive чувствительны
+    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
+
+
+def _expand_short_url(client: httpx.Client, url: str) -> str:
+    if "yadi.sk" not in url:
+        return url
+    try:
+        resp = client.get(url, follow_redirects=True)
+        return str(resp.url)
+    except Exception:
+        return url
+
+
 def _gdrive_file_id(url: str) -> str | None:
-    for pattern in (GDRIVE_FILE_RE, GDRIVE_OPEN_RE, GDRIVE_ID_RE):
+    for pattern in (GDRIVE_FILE_RE, GDRIVE_ID_RE):
         match = pattern.search(url)
         if match:
             return match.group(1)
+    if "drive.google.com" in url:
+        qs = parse_qs(urlparse(url).query)
+        if "id" in qs and qs["id"]:
+            return qs["id"][0]
     return None
 
 
-def _resolve_gdrive(url: str) -> str:
-    file_id = _gdrive_file_id(url)
-    if not file_id:
-        raise UrlDownloadError("Не понял ссылку Google Drive. Нужна ссылка вида drive.google.com/file/d/...")
-    return f"https://drive.google.com/uc?export=download&id={file_id}&confirm=t"
+def _is_html(data: bytes) -> bool:
+    head = data[:512].lstrip().lower()
+    return head.startswith(b"<!doctype") or head.startswith(b"<html") or b"<html" in head
 
 
-def _resolve_dropbox(url: str) -> str:
-    parsed = urlparse(url)
-    if "dropbox.com" not in parsed.netloc:
-        raise UrlDownloadError("Это не Dropbox.")
-    out = url.replace("?dl=0", "?dl=1")
-    if "dl=1" not in out:
-        out += "&dl=1" if "?" in out else "?dl=1"
-    return out
-
-
-def _resolve_yandex(url: str) -> str:
-    if "disk.yandex" not in url and "yadi.sk" not in url:
-        raise UrlDownloadError("Это не Яндекс.Диск.")
-    # API принимает полный public URL
-    public_key = quote(url, safe="")
-    api = f"https://cloud-api.yandex.net/v1/disk/public/resources/download?public_key={public_key}"
-    try:
-        resp = httpx.get(api, timeout=60.0, follow_redirects=True)
-        resp.raise_for_status()
-        data = resp.json()
-    except httpx.HTTPStatusError as exc:
-        code = exc.response.status_code
-        if code == 404:
-            raise UrlDownloadError(
-                "Яндекс.Диск: файл не найден. Проверь ссылку и доступ «всем по ссылке»."
-            ) from exc
-        raise UrlDownloadError(f"Яндекс.Диск ошибка {code}") from exc
-    except Exception as exc:
-        raise UrlDownloadError(f"Яндекс.Диск не отдал ссылку: {exc}") from exc
-    href = data.get("href")
-    if not href:
-        raise UrlDownloadError("Яндекс.Диск: ссылка недоступна. Открой доступ «всем по ссылке».")
-    return href
-
-
-def resolve_download_url(url: str) -> str:
-    lower = url.lower()
-    if "drive.google.com" in lower or "docs.google.com" in lower:
-        return _resolve_gdrive(url)
-    if "dropbox.com" in lower:
-        return _resolve_dropbox(url)
-    if "disk.yandex" in lower or "yadi.sk" in lower:
-        return _resolve_yandex(url)
-    path = unquote(urlparse(url).path).lower()
-    if any(path.endswith(ext) for ext in VIDEO_SUFFIXES):
-        return url
-    if "video" in lower or "download" in lower or "cdn" in lower:
-        return url
-    raise UrlDownloadError(
-        "Поддерживаю: Google Drive, Яндекс.Диск, Dropbox или прямую ссылку на .mp4/.mov"
-    )
-
-
-def _filename_from_response(resp: httpx.Response, url: str) -> str:
-    cd = resp.headers.get("content-disposition", "")
-    match = re.search(r'filename[*]?=(?:UTF-8\'\')?"?([^";]+)"?', cd, re.IGNORECASE)
-    if match:
-        name = match.group(1).strip()
-        if name:
-            return name
-    path = urlparse(url).path
-    if path and "/" in path:
-        candidate = Path(unquote(path.split("/")[-1])).name
-        if candidate and "." in candidate:
-            return candidate
-    return "video.mp4"
-
-
-def _looks_like_video(resp: httpx.Response, filename: str) -> bool:
-    ctype = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
-    if any(ctype.startswith(m) for m in VIDEO_MIMES):
-        return True
-    if any(filename.lower().endswith(ext) for ext in VIDEO_SUFFIXES):
-        return True
-    if "google" in ctype or "html" in ctype or "text" in ctype:
+def _is_video_header(data: bytes) -> bool:
+    if len(data) < 12:
         return False
-    # если тип неизвестен, но размер большой — скорее видео
-    cl = resp.headers.get("content-length")
-    if cl and int(cl) > 500_000:
+    if data[4:8] == b"ftyp":  # mp4 / mov
+        return True
+    if data[:4] == b"\x1aE\xdf\xa3":  # mkv / webm
         return True
     return False
 
 
-def _gdrive_stream_url(client: httpx.Client, file_id: str) -> str:
-    base = f"https://drive.google.com/uc?export=download&id={file_id}"
-    resp = client.get(base)
-    resp.raise_for_status()
-    ctype = (resp.headers.get("content-type") or "").lower()
-    if "text/html" not in ctype:
-        return base
+def _verify_video_file(path: Path) -> None:
+    with path.open("rb") as fh:
+        head = fh.read(64)
+    if _is_html(head):
+        raise UrlDownloadError(
+            "Скачалась страница сайта, а не видео.\n\n"
+            "Поделись ссылкой именно на файл (не папку). "
+            "Или скачай mp4 и отправь файлом до 20 MB."
+        )
+    if not _is_video_header(head):
+        raise UrlDownloadError("По ссылке не видеофайл (нужен mp4/mov).")
 
-    token_match = re.search(r"confirm=([0-9A-Za-z_]+)", resp.text)
-    token = token_match.group(1) if token_match else "t"
-    for cookie in resp.cookies.jar:
-        if cookie.name.startswith("download_warning"):
-            token = cookie.value
-            break
-    return f"{base}&confirm={token}"
+
+def _stream_to_file(client: httpx.Client, stream_url: str, destination: Path, max_bytes: int) -> int:
+    timeout = httpx.Timeout(connect=45.0, read=600.0, write=30.0, pool=30.0)
+    with client.stream("GET", stream_url, timeout=timeout, follow_redirects=True) as resp:
+        resp.raise_for_status()
+        cl = resp.headers.get("content-length")
+        if cl and int(cl) > max_bytes:
+            raise UrlDownloadError(f"Файл {int(cl) // (1024 * 1024)} MB — больше лимита {max_bytes // (1024 * 1024)} MB.")
+
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        total = 0
+        first_chunk = b""
+        with destination.open("wb") as fh:
+            for chunk in resp.iter_bytes(chunk_size=1024 * 256):
+                if not chunk:
+                    continue
+                if not first_chunk:
+                    first_chunk = chunk[:512]
+                    if _is_html(first_chunk):
+                        raise UrlDownloadError("html_page")
+                total += len(chunk)
+                if total > max_bytes:
+                    destination.unlink(missing_ok=True)
+                    raise UrlDownloadError(f"Файл больше {max_bytes // (1024 * 1024)} MB.")
+                fh.write(chunk)
+
+    if total < 10_000:
+        destination.unlink(missing_ok=True)
+        raise UrlDownloadError("tiny_file")
+    _verify_video_file(destination)
+    return total
+
+
+def _gdrive_download_urls(client: httpx.Client, file_id: str) -> list[str]:
+    urls = [
+        f"https://drive.usercontent.google.com/download?id={file_id}&export=download&confirm=t",
+        f"https://drive.google.com/uc?export=download&id={file_id}&confirm=t",
+        f"https://docs.google.com/uc?export=download&id={file_id}&confirm=t",
+    ]
+    try:
+        base = f"https://drive.google.com/uc?export=download&id={file_id}"
+        resp = client.get(base, timeout=30.0)
+        if resp.status_code == 200:
+            ctype = (resp.headers.get("content-type") or "").lower()
+            if "text/html" in ctype:
+                token = "t"
+                m = re.search(r"confirm=([0-9A-Za-z_-]+)", resp.text)
+                if m:
+                    token = m.group(1)
+                for cookie in resp.cookies.jar:
+                    if cookie.name.startswith("download_warning"):
+                        token = cookie.value
+                        break
+                urls.insert(0, f"{base}&confirm={token}")
+            elif "text/html" not in ctype:
+                urls.insert(0, base)
+    except Exception:
+        pass
+    return urls
+
+
+def _download_gdrive(client: httpx.Client, url: str, destination: Path, max_bytes: int) -> int:
+    file_id = _gdrive_file_id(url)
+    if not file_id:
+        raise UrlDownloadError(
+            "Не понял ссылку Google Drive.\n"
+            "Нужна ссылка на файл: drive.google.com/file/d/…/view"
+        )
+    last_err: Exception | None = None
+    for stream_url in _gdrive_download_urls(client, file_id):
+        try:
+            return _stream_to_file(client, stream_url, destination, max_bytes)
+        except UrlDownloadError as exc:
+            last_err = exc
+            if str(exc) not in ("html_page", "tiny_file"):
+                raise
+            destination.unlink(missing_ok=True)
+        except Exception as exc:
+            last_err = exc
+            destination.unlink(missing_ok=True)
+
+    raise UrlDownloadError(
+        "Google Drive не отдал видео.\n\n"
+        "Проверь:\n"
+        "• Ссылка на файл, не на папку\n"
+        "• Доступ: «Все, у кого есть ссылка»\n"
+        "• Или скачай mp4 и отправь **файлом** в бота"
+    ) from last_err
+
+
+def _download_yandex(client: httpx.Client, url: str, destination: Path, max_bytes: int) -> int:
+    url = _clean_share_url(_expand_short_url(client, url))
+
+    if "/d/" in url and "/i/" not in url:
+        try:
+            meta = client.get(
+                "https://cloud-api.yandex.net/v1/disk/public/resources",
+                params={"public_key": url, "limit": 1},
+                timeout=30.0,
+            )
+            if meta.status_code == 200:
+                info = meta.json()
+                if info.get("type") == "dir":
+                    raise UrlDownloadError(
+                        "Это ссылка на папку, а нужна на видеофайл.\n\n"
+                        "Яндекс.Диск: открой файл → Поделиться → Скопировать ссылку"
+                    )
+        except UrlDownloadError:
+            raise
+        except Exception:
+            pass
+
+    try:
+        resp = client.get(
+            "https://cloud-api.yandex.net/v1/disk/public/resources/download",
+            params={"public_key": url},
+            timeout=60.0,
+        )
+        resp.raise_for_status()
+        href = resp.json().get("href")
+    except httpx.HTTPStatusError as exc:
+        code = exc.response.status_code
+        if code in (403, 404):
+            raise UrlDownloadError(
+                "Яндекс.Диск не открыл файл.\n\n"
+                "• Открой файл (не папку) → Поделиться\n"
+                "• «Скопировать ссылку» / доступ по ссылке\n"
+                "• Пришли ссылку вида disk.yandex.ru/i/…"
+            ) from exc
+        raise UrlDownloadError(f"Яндекс.Диск ошибка {code}") from exc
+    except Exception as exc:
+        raise UrlDownloadError(f"Яндекс.Диск: {exc}") from exc
+
+    if not href:
+        raise UrlDownloadError("Яндекс.Диск не вернул ссылку на скачивание.")
+
+    try:
+        return _stream_to_file(client, href, destination, max_bytes)
+    except UrlDownloadError as exc:
+        if str(exc) in ("html_page", "tiny_file"):
+            raise UrlDownloadError(
+                "Яндекс.Диск отдал не видео.\n"
+                "Проверь, что ссылка на mp4/mov файл, не на папку."
+            ) from exc
+        raise
+
+
+def _download_dropbox(client: httpx.Client, url: str, destination: Path, max_bytes: int) -> int:
+    stream_url = url.replace("?dl=0", "?dl=1")
+    if "dl=1" not in stream_url:
+        stream_url += "&dl=1" if "?" in stream_url else "?dl=1"
+    return _stream_to_file(client, stream_url, destination, max_bytes)
+
+
+def _download_direct(client: httpx.Client, url: str, destination: Path, max_bytes: int) -> int:
+    return _stream_to_file(client, url, destination, max_bytes)
 
 
 def download_video_url(url: str, destination: Path, max_mb: int) -> int:
-    """Скачать видео по ссылке. Возвращает размер в байтах."""
-    direct = resolve_download_url(url)
+    url = url.strip()
+    lower = url.lower()
     max_bytes = max_mb * 1024 * 1024
-    timeout = httpx.Timeout(connect=30.0, read=300.0, write=30.0, pool=30.0)
 
-    with httpx.Client(timeout=timeout, follow_redirects=True) as client:
-        stream_url = direct
-        if "drive.google.com" in url.lower():
-            file_id = _gdrive_file_id(url)
-            if file_id:
-                stream_url = _gdrive_stream_url(client, file_id)
+    with httpx.Client(headers=UA, follow_redirects=True) as client:
+        if "drive.google.com" in lower or "docs.google.com" in lower:
+            return _download_gdrive(client, url, destination, max_bytes)
+        if "disk.yandex" in lower or "yadi.sk" in lower:
+            return _download_yandex(client, url, destination, max_bytes)
+        if "dropbox.com" in lower:
+            return _download_dropbox(client, url, destination, max_bytes)
 
-        with client.stream("GET", stream_url) as resp:
-            resp.raise_for_status()
-            filename = _filename_from_response(resp, stream_url)
-            ctype = (resp.headers.get("content-type") or "").lower()
-            if "text/html" in ctype:
-                raise UrlDownloadError(
-                    "Файл недоступен. Открой доступ «всем по ссылке» и попробуй снова."
-                )
-            if not _looks_like_video(resp, filename):
-                raise UrlDownloadError(
-                    "По ссылке не видео. Залей mp4/mov и открой доступ по ссылке."
-                )
-            cl = resp.headers.get("content-length")
-            if cl and int(cl) > max_bytes:
-                raise UrlDownloadError(
-                    f"Файл {int(cl) // (1024 * 1024)} MB — больше лимита {max_mb} MB."
-                )
+        path = urlparse(url).path.lower()
+        if any(path.endswith(ext) for ext in VIDEO_SUFFIXES):
+            return _download_direct(client, url, destination, max_bytes)
 
-            total = 0
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            with destination.open("wb") as fh:
-                for chunk in resp.iter_bytes(chunk_size=1024 * 256):
-                    if not chunk:
-                        continue
-                    total += len(chunk)
-                    if total > max_bytes:
-                        destination.unlink(missing_ok=True)
-                        raise UrlDownloadError(f"Файл больше {max_mb} MB.")
-                    fh.write(chunk)
-
-    if total < 50_000:
-        destination.unlink(missing_ok=True)
         raise UrlDownloadError(
-            "Скачалось слишком мало — возможно, ссылка ведёт на страницу, а не на файл. "
-            "Проверь доступ «всем по ссылке»."
+            "Не понял ссылку.\n\n"
+            "Поддерживаю:\n"
+            "• Google Drive (на файл)\n"
+            "• Яндекс.Диск disk.yandex.ru/i/…\n"
+            "• Dropbox\n"
+            "• Прямая ссылка на .mp4"
         )
-    return total
