@@ -15,7 +15,7 @@ from bot.config import Settings, create_groq_client
 from bot.db import (
     add_bonus,
     can_process_video,
-    claim_update,
+    claim_message,
     get_prefs,
     get_recent_users,
     get_stats,
@@ -451,6 +451,10 @@ class TelegramBot:
 
         chat_id = message["chat"]["id"]
         user_id = message["from"]["id"]
+        msg_id = message.get("message_id")
+        if msg_id is not None and not claim_message(chat_id, msg_id):
+            return
+
         text = (message.get("text") or "").strip()
         cmd = text.split()[0].split("@")[0].lower() if text else ""
 

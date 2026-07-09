@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from bot.services.ffmpeg_utils import get_ffmpeg_binary, get_media_duration
+from bot.services.ffmpeg_utils import get_ffmpeg_binary, get_media_duration, get_stream_start_time
 
 # large-v3 — максимальная точность на Groq (turbo только если упадёт)
 WHISPER_MODEL = "whisper-large-v3"
@@ -48,7 +48,7 @@ def _extract_audio(video_path: Path, audio_path: Path) -> None:
             "-ac",
             "1",
             "-af",
-            "highpass=f=80,lowpass=f=9000,volume=1.4",
+            "asetpts=PTS-STARTPTS,highpass=f=80",
             str(audio_path),
         ],
         check=True,
@@ -80,39 +80,41 @@ def _parse_words(response) -> list[Word]:
     return words
 
 
-def _smooth_words(words: list[Word]) -> list[Word]:
-    """Сгладить тайминги слов — меньше рывков на видео."""
+def _preserve_whisper_words(words: list[Word]) -> list[Word]:
+    """Минимальная правка: только перекрытия, длительности Whisper не трогаем."""
     if not words:
         return []
     words = sorted(words, key=lambda w: w.start)
-    smoothed: list[Word] = []
-
-    for i, word in enumerate(words):
+    fixed: list[Word] = []
+    for word in words:
         start = word.start
-        end = max(word.end, start + 0.07)
-
-        if i + 1 < len(words):
-            nxt = words[i + 1]
-            gap = nxt.start - end
-            if 0 < gap < 0.35:
-                end = nxt.start
-            elif gap < 0:
-                end = min(end, nxt.start - 0.02)
-
-        if smoothed:
-            prev = smoothed[-1]
-            if start < prev.end:
-                start = prev.end
-            if start - prev.end > 0.5:
-                pass
-            elif start - prev.end < 0.02:
-                start = prev.end
-
+        end = max(word.end, start + 0.04)
+        if fixed and start < fixed[-1].end:
+            start = fixed[-1].end
         if end <= start:
-            end = start + 0.07
-        smoothed.append(Word(text=word.text, start=start, end=end))
+            end = start + 0.04
+        fixed.append(Word(text=word.text, start=start, end=end))
+    return fixed
 
-    return smoothed
+
+def _apply_time_offset(segments: list[SubtitleSegment], offset: float) -> list[SubtitleSegment]:
+    if abs(offset) < 0.001:
+        return segments
+    out: list[SubtitleSegment] = []
+    for seg in segments:
+        words = [
+            Word(text=w.text, start=max(0.0, w.start + offset), end=max(0.0, w.end + offset))
+            for w in (seg.words or [])
+        ]
+        out.append(
+            SubtitleSegment(
+                start=max(0.0, seg.start + offset),
+                end=max(0.0, seg.end + offset),
+                text=seg.text,
+                words=words,
+            )
+        )
+    return out
 
 
 def _segments_from_words(words: list[Word], pause_gap: float = 0.55) -> list[SubtitleSegment]:
@@ -218,17 +220,19 @@ def transcribe_video(client, video_path: Path, work_dir: Path) -> list[SubtitleS
 
     video_duration = get_media_duration(str(video_path))
     audio_duration = duration
-    timeline = max(video_duration, audio_duration)
+    audio_offset = get_stream_start_time(str(video_path), "a:0")
 
-    words = _smooth_words(_parse_words(response))
+    words = _preserve_whisper_words(_parse_words(response))
     if words:
         segments = _segments_from_words(words)
     else:
         segments = _parse_segments_fallback(response, duration)
         for seg in segments:
-            seg.words = _smooth_words(_synth_words(seg))
+            seg.words = _preserve_whisper_words(_synth_words(seg))
 
-    return align_segments_to_duration(segments, timeline, audio_duration=audio_duration)
+    segments = _apply_time_offset(segments, audio_offset)
+    timeline = max(video_duration, audio_duration + audio_offset)
+    return align_segments_to_duration(segments, timeline, audio_duration=audio_duration + audio_offset)
 
 
 def _synth_words(segment: SubtitleSegment) -> list[Word]:
@@ -414,9 +418,9 @@ def align_segments_to_duration(
     duration: float,
     *,
     audio_duration: float = 0.0,
-    tolerance: float = 0.04,
+    tolerance: float = 0.12,
 ) -> list[SubtitleSegment]:
-    """Сжать тайминги только если речь явно длиннее медиа (не по заниженному metadata)."""
+    """Сжать только при явном переливе речи за пределы файла (>12%)."""
     if not segments or duration <= 0:
         return segments
     ref = max(duration, audio_duration or 0.0)

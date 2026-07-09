@@ -373,8 +373,18 @@ def _build_punch(style: SubtitleStyle, segments: list[SubtitleSegment], accent: 
         if style.uppercase:
             text = text.upper()
         body = f"{prefix}{{\\c{text_color}}}{_pop_tag()}{text}"
-        lines.append(_dialogue(start, end, body))
+        lines.append(_dialogue(start, end, body, fade_ms=0))
     return lines
+
+
+def _karaoke_dialogue_end(group: list[Word], pad: float = 0.15) -> float:
+    prev = group[0].start
+    total = 0.0
+    for w in group:
+        total += max(0.0, w.start - prev)
+        total += max(0.04, w.end - w.start)
+        prev = w.end
+    return group[0].start + total + pad
 
 
 def _build_karaoke(style: SubtitleStyle, segments: list[SubtitleSegment], accent: str | None) -> list[str]:
@@ -385,22 +395,22 @@ def _build_karaoke(style: SubtitleStyle, segments: list[SubtitleSegment], accent
     for group in _group_words(words, KARAOKE_MAX_WORDS, KARAOKE_MAX_CHARS, LINE_MAX_DUR):
         if not group:
             continue
-        start, end = _line_timing(group[0].start, group[-1].end)
-        end = max(end, start + 0.4)
+        start = max(0.0, group[0].start - 0.02)
+        end = max(_karaoke_dialogue_end(group), group[-1].end + 0.1)
         parts: list[str] = []
-        prev_end = group[0].start
+        prev_end = start
         for w in group:
             gap_cs = int(round(max(0.0, w.start - prev_end) * 100))
             if gap_cs > 0:
-                parts.append(f"{{\\k{min(gap_cs, 30)}}}")
-            dur_cs = max(WORD_MIN_CS, int(round((w.end - w.start) * 100)))
+                parts.append(f"{{\\k{gap_cs}}}")
+            dur_cs = max(WORD_MIN_CS, int(round(max(0.04, w.end - w.start) * 100)))
             token = _escape_word(w.text)
             if style.uppercase:
                 token = token.upper()
             parts.append(f"{{\\kf{dur_cs}\\c{highlight}}}{token} ")
             prev_end = w.end
         body = f"{prefix}{{\\c{WHITE}}}" + "".join(parts)
-        lines.append(_dialogue(start, end, body))
+        lines.append(_dialogue(start, end, body, fade_ms=0))
     return lines
 
 

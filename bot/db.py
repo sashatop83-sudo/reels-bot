@@ -68,6 +68,16 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS handled_messages (
+                chat_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                ts REAL NOT NULL,
+                PRIMARY KEY (chat_id, message_id)
+            )
+            """
+        )
         conn.commit()
 
 
@@ -238,7 +248,7 @@ def get_stats() -> dict:
         }
 
 
-def try_start_welcome(user_id: int, cooldown: float = 10.0) -> bool:
+def try_start_welcome(user_id: int, cooldown: float = 30.0) -> bool:
     """Не слать приветствие повторно, если /start пришёл дважды подряд."""
     now = time.time()
     conn = _connect()
@@ -262,6 +272,25 @@ def try_start_welcome(user_id: int, cooldown: float = 10.0) -> bool:
     except Exception:
         conn.rollback()
         return True
+    finally:
+        conn.close()
+
+
+def claim_message(chat_id: int, message_id: int) -> bool:
+    """Одно сообщение Telegram — один ответ (даже при двух копиях бота)."""
+    now = time.time()
+    conn = _connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "INSERT INTO handled_messages (chat_id, message_id, ts) VALUES (?, ?, ?)",
+            (chat_id, message_id, now),
+        )
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        return False
     finally:
         conn.close()
 

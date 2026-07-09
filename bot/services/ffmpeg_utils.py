@@ -118,6 +118,31 @@ def _probe_duration(path: str, args: list[str]) -> float:
         return 0.0
 
 
+def get_stream_start_time(path: str, stream: str = "a:0") -> float:
+    """Смещение потока от начала файла (частая причина рассинхрона)."""
+    ffprobe = get_ffprobe_binary()
+    try:
+        result = subprocess.run(
+            [
+                ffprobe,
+                "-v",
+                "error",
+                "-select_streams",
+                stream,
+                "-show_entries",
+                "stream=start_time",
+                "-of",
+                "csv=p=0",
+                path,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        return max(0.0, float(result.stdout.strip()))
+    except Exception:
+        return 0.0
+
+
 def get_media_duration(path: str) -> float:
     """Максимальная длительность из контейнера и потоков — без обрезки хвоста видео."""
     durations = [
