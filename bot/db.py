@@ -52,6 +52,14 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS processed_updates (
+                update_id INTEGER PRIMARY KEY,
+                ts REAL NOT NULL
+            )
+            """
+        )
         conn.commit()
 
 
@@ -220,6 +228,48 @@ def get_stats() -> dict:
             "new_24h": new_24h,
             "pays": pays,
         }
+
+
+def claim_update(update_id: int) -> bool:
+    """Атомарно: только одна копия бота обрабатывает апдейт (общая SQLite на Railway)."""
+    now = time.time()
+    conn = _connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "INSERT INTO processed_updates (update_id, ts) VALUES (?, ?)",
+            (update_id, now),
+        )
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
+
+def _trim_processed_updates(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        "DELETE FROM processed_updates WHERE update_id NOT IN "
+        "(SELECT update_id FROM processed_updates ORDER BY update_id DESC LIMIT 5000)"
+    )
+
+
+def load_poll_offset() -> int:
+    path = DB_PATH.parent / "poll_offset.txt"
+    try:
+        return max(0, int(path.read_text().strip()))
+    except Exception:
+        return 0
+
+
+def save_poll_offset(offset: int) -> None:
+    path = DB_PATH.parent / "poll_offset.txt"
+    try:
+        path.write_text(str(max(0, offset)))
+    except Exception:
+        pass
 
 
 def get_recent_users(limit: int = 25) -> list[dict]:

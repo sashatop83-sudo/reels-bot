@@ -15,12 +15,15 @@ from bot.config import Settings, create_groq_client
 from bot.db import (
     add_bonus,
     can_process_video,
+    claim_update,
     get_prefs,
     get_recent_users,
     get_stats,
     increment_usage,
+    load_poll_offset,
     log_event,
     remaining_videos,
+    save_poll_offset,
     save_prefs,
     set_premium,
     try_set_referrer,
@@ -90,7 +93,6 @@ class TelegramBot:
         self.busy: set[int] = set()
         self.render_sem = asyncio.Semaphore(settings.max_concurrent_renders)
         self.bot_username = ""
-        self._seen_updates: set[int] = set()
 
     # ---------- Telegram API ----------
 
@@ -1060,11 +1062,20 @@ class TelegramBot:
     async def poll(self) -> None:
         await self.set_commands()
         try:
+            await self._api("deleteWebhook", drop_pending_updates=True)
+        except Exception:
+            logger.warning("deleteWebhook failed", exc_info=True)
+        self.offset = load_poll_offset()
+        try:
             me = await self._api("getMe")
             self.bot_username = me.get("username", "")
         except Exception:
             pass
-        logger.info("Reels bot polling started%s", " | ЮKassa ON" if self.settings.has_yookassa else "")
+        logger.info(
+            "Reels bot polling started (offset=%s)%s",
+            self.offset,
+            " | ЮKassa ON" if self.settings.has_yookassa else "",
+        )
         while True:
             try:
                 updates = await self._api(
@@ -1076,12 +1087,11 @@ class TelegramBot:
                 for update in updates:
                     uid = update["update_id"]
                     self.offset = uid + 1
-                    if uid in self._seen_updates:
+                    if not claim_update(uid):
                         continue
-                    self._seen_updates.add(uid)
-                    if len(self._seen_updates) > 1000:
-                        self._seen_updates = set(list(self._seen_updates)[-500:])
                     await self.handle_update(update)
+                if updates:
+                    save_poll_offset(self.offset)
             except Exception:
                 logger.exception("Polling error")
                 await asyncio.sleep(3)
