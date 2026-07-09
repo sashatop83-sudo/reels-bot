@@ -10,7 +10,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from bot.services.transcribe import SubtitleSegment, Word
+from bot.services.transcribe import SubtitleSegment, Word, collect_all_words
 
 FONTS_DIR = Path(__file__).resolve().parent.parent.parent / "assets" / "fonts"
 
