@@ -27,6 +27,7 @@ from bot.db import (
 )
 from bot.telegram_files import download_telegram_file
 from bot.services.payments import invoice_prices, yookassa_provider_data
+from bot.services.url_download import UrlDownloadError, download_video_url, extract_url_from_message
 from bot.services.pipeline import (
     VideoProcessingError,
     prepare_segments,
@@ -480,7 +481,7 @@ class TelegramBot:
             return
 
         if text and not text.startswith("/"):
-            url = extract_url(text)
+            url = extract_url_from_message(text, message.get("entities"))
             if url:
                 await self._handle_url(chat_id, user_id, url)
                 return

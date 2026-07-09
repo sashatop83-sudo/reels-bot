@@ -15,6 +15,7 @@ URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 GDRIVE_FILE_RE = re.compile(r"drive\.google\.com/file/d/([a-zA-Z0-9_-]+)")
 GDRIVE_OPEN_RE = re.compile(r"drive\.google\.com/(?:open|uc)\?[^#]*[?&]id=([a-zA-Z0-9_-]+)")
 GDRIVE_ID_RE = re.compile(r"[?&]id=([a-zA-Z0-9_-]+)")
+YANDEX_PUBLIC_RE = re.compile(r"(?:disk\.yandex\.(?:ru|com)|yadi\.sk)/(?:i|d)/([a-zA-Z0-9_-]+)")
 
 
 class UrlDownloadError(Exception):
@@ -26,6 +27,25 @@ def extract_url(text: str) -> str | None:
     if not match:
         return None
     return match.group(0).rstrip(".,;)")
+
+
+def extract_url_from_message(text: str, entities: list | None) -> str | None:
+    """URL из текста или из entities Telegram (когда ссылка кликабельная)."""
+    found = extract_url(text or "")
+    if found:
+        return found
+    if not entities:
+        return None
+    for ent in entities:
+        if ent.get("type") != "url":
+            continue
+        offset = ent.get("offset", 0)
+        length = ent.get("length", 0)
+        part = (text or "")[offset : offset + length]
+        found = extract_url(part)
+        if found:
+            return found
+    return None
 
 
 def _gdrive_file_id(url: str) -> str | None:
@@ -56,17 +76,25 @@ def _resolve_dropbox(url: str) -> str:
 def _resolve_yandex(url: str) -> str:
     if "disk.yandex" not in url and "yadi.sk" not in url:
         raise UrlDownloadError("Это не Яндекс.Диск.")
+    # API принимает полный public URL
     public_key = quote(url, safe="")
     api = f"https://cloud-api.yandex.net/v1/disk/public/resources/download?public_key={public_key}"
     try:
-        resp = httpx.get(api, timeout=30.0, follow_redirects=True)
+        resp = httpx.get(api, timeout=60.0, follow_redirects=True)
         resp.raise_for_status()
         data = resp.json()
+    except httpx.HTTPStatusError as exc:
+        code = exc.response.status_code
+        if code == 404:
+            raise UrlDownloadError(
+                "Яндекс.Диск: файл не найден. Проверь ссылку и доступ «всем по ссылке»."
+            ) from exc
+        raise UrlDownloadError(f"Яндекс.Диск ошибка {code}") from exc
     except Exception as exc:
         raise UrlDownloadError(f"Яндекс.Диск не отдал ссылку: {exc}") from exc
     href = data.get("href")
     if not href:
-        raise UrlDownloadError("Яндекс.Диск: ссылка недоступна. Проверь, что файл открыт по ссылке.")
+        raise UrlDownloadError("Яндекс.Диск: ссылка недоступна. Открой доступ «всем по ссылке».")
     return href
 
 
