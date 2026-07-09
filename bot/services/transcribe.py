@@ -3,8 +3,15 @@ from pathlib import Path
 
 from bot.services.ffmpeg_utils import get_ffmpeg_binary, get_media_duration
 
+# large-v3 — максимальная точность на Groq (turbo только если упадёт)
 WHISPER_MODEL = "whisper-large-v3"
 WHISPER_FALLBACK = "whisper-large-v3-turbo"
+
+# Подсказка модели — меньше ошибок в русской разговорной речи
+RUSSIAN_PROMPT = (
+    "Разговорная речь на русском языке. Видео, блог, reels, сторис. "
+    "Транскрибируй слова точно как произнесены, без выдумывания."
+)
 
 
 @dataclass
@@ -26,6 +33,7 @@ def _extract_audio(video_path: Path, audio_path: Path) -> None:
     import subprocess
 
     ffmpeg_bin = get_ffmpeg_binary()
+    # Чистим голос для Whisper: убираем низкий гул, нормализуем громкость
     subprocess.run(
         [
             ffmpeg_bin,
@@ -39,6 +47,8 @@ def _extract_audio(video_path: Path, audio_path: Path) -> None:
             "16000",
             "-ac",
             "1",
+            "-af",
+            "highpass=f=80,lowpass=f=9000,loudnorm=I=-16:TP=-1.5:LRA=11",
             str(audio_path),
         ],
         check=True,
@@ -70,33 +80,75 @@ def _parse_words(response) -> list[Word]:
     return words
 
 
-def _assign_words(segments: list[SubtitleSegment], words: list[Word]) -> None:
-    if not words or not segments:
-        return
-    for segment in segments:
-        segment.words = []
+def _smooth_words(words: list[Word]) -> list[Word]:
+    """Сгладить тайминги слов — меньше рывков на видео."""
+    if not words:
+        return []
+    words = sorted(words, key=lambda w: w.start)
+    smoothed: list[Word] = []
+
+    for i, word in enumerate(words):
+        start = word.start
+        end = max(word.end, start + 0.07)
+
+        if i + 1 < len(words):
+            nxt = words[i + 1]
+            gap = nxt.start - end
+            if 0 < gap < 0.35:
+                end = nxt.start
+            elif gap < 0:
+                end = min(end, nxt.start - 0.02)
+
+        if smoothed:
+            prev = smoothed[-1]
+            if start < prev.end:
+                start = prev.end
+            if start - prev.end > 0.5:
+                pass
+            elif start - prev.end < 0.02:
+                start = prev.end
+
+        if end <= start:
+            end = start + 0.07
+        smoothed.append(Word(text=word.text, start=start, end=end))
+
+    return smoothed
+
+
+def _segments_from_words(words: list[Word], pause_gap: float = 0.55) -> list[SubtitleSegment]:
+    """Сегменты из потока слов — текст и тайминги из одного источника."""
+    if not words:
+        return []
+
+    groups: list[list[Word]] = []
+    current: list[Word] = []
     for word in words:
-        mid = (word.start + word.end) / 2
-        target = None
-        for segment in segments:
-            if segment.start - 0.08 <= mid <= segment.end + 0.08:
-                target = segment
-                break
-        if target is None:
-            target = min(
-                segments,
-                key=lambda s: min(abs(mid - s.start), abs(mid - s.end)),
-            )
-        target.words.append(word)
-    for segment in segments:
-        segment.words.sort(key=lambda w: w.start)
+        if current and word.start - current[-1].end > pause_gap:
+            groups.append(current)
+            current = []
+        current.append(word)
+    if current:
+        groups.append(current)
 
-
-def _parse_segments(response, total_duration: float = 0.0) -> list[SubtitleSegment]:
     segments: list[SubtitleSegment] = []
-    raw_segments = _get(response, "segments") or []
+    for group in groups:
+        text = " ".join(w.text for w in group).strip()
+        if not text:
+            continue
+        segments.append(
+            SubtitleSegment(
+                start=group[0].start,
+                end=max(group[-1].end, group[0].start + 0.2),
+                text=text,
+                words=list(group),
+            )
+        )
+    return segments
 
-    for item in raw_segments:
+
+def _parse_segments_fallback(response, total_duration: float = 0.0) -> list[SubtitleSegment]:
+    segments: list[SubtitleSegment] = []
+    for item in _get(response, "segments") or []:
         text = (_get(item, "text") or "").strip()
         if not text:
             continue
@@ -107,12 +159,9 @@ def _parse_segments(response, total_duration: float = 0.0) -> list[SubtitleSegme
             continue
         segments.append(SubtitleSegment(start=start, end=end, text=text))
 
-    words = _parse_words(response)
-    _assign_words(segments, words)
-
     if not segments and _get(response, "text"):
         full = str(_get(response, "text")).strip()
-        end = total_duration if total_duration and total_duration > 1 else max(len(full.split()) * 0.5, 3.0)
+        end = total_duration if total_duration > 1 else max(len(full.split()) * 0.5, 3.0)
         segments.append(SubtitleSegment(start=0.0, end=end, text=full))
 
     return segments
@@ -122,18 +171,15 @@ def _transcribe_once(client, audio_path: Path, model: str, with_words: bool):
     params: dict = {
         "model": model,
         "language": "ru",
+        "prompt": RUSSIAN_PROMPT,
         "response_format": "verbose_json",
+        "temperature": 0,
     }
     if with_words:
-        params["timestamp_granularities"] = ["segment", "word"]
-    try:
-        params["temperature"] = 0
-        with audio_path.open("rb") as audio_file:
-            return client.audio.transcriptions.create(file=audio_file, **params)
-    except TypeError:
-        params.pop("temperature", None)
-        with audio_path.open("rb") as audio_file:
-            return client.audio.transcriptions.create(file=audio_file, **params)
+        params["timestamp_granularities"] = ["word", "segment"]
+
+    with audio_path.open("rb") as audio_file:
+        return client.audio.transcriptions.create(file=audio_file, **params)
 
 
 def transcribe_video(client, video_path: Path, work_dir: Path) -> list[SubtitleSegment]:
@@ -145,12 +191,12 @@ def transcribe_video(client, video_path: Path, work_dir: Path) -> list[SubtitleS
     for model in (WHISPER_MODEL, WHISPER_FALLBACK):
         try:
             response = _transcribe_once(client, audio_path, model, with_words=True)
-            if _get(response, "segments"):
+            if _parse_words(response) or _get(response, "segments"):
                 break
         except Exception:
             response = None
 
-    if response is None or not (_get(response, "segments")):
+    if response is None:
         for model in (WHISPER_MODEL, WHISPER_FALLBACK):
             try:
                 response = _transcribe_once(client, audio_path, model, with_words=False)
@@ -162,10 +208,31 @@ def transcribe_video(client, video_path: Path, work_dir: Path) -> list[SubtitleS
     if response is None:
         with audio_path.open("rb") as audio_file:
             response = client.audio.transcriptions.create(
-                model=WHISPER_FALLBACK,
+                model=WHISPER_MODEL,
                 file=audio_file,
                 language="ru",
+                prompt=RUSSIAN_PROMPT,
                 response_format="json",
+                temperature=0,
             )
 
-    return _parse_segments(response, duration)
+    words = _smooth_words(_parse_words(response))
+    if words:
+        return _segments_from_words(words)
+
+    segments = _parse_segments_fallback(response, duration)
+    for seg in segments:
+        seg.words = _smooth_words(_synth_words(seg))
+    return segments
+
+
+def _synth_words(segment: SubtitleSegment) -> list[Word]:
+    tokens = [t for t in segment.text.split() if t]
+    if not tokens:
+        return []
+    duration = max(segment.end - segment.start, 0.4)
+    step = duration / len(tokens)
+    return [
+        Word(text=tok, start=segment.start + i * step, end=segment.start + (i + 1) * step)
+        for i, tok in enumerate(tokens)
+    ]

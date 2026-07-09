@@ -181,11 +181,13 @@ STYLES: dict[str, SubtitleStyle] = {
 STYLE_ORDER = ["hormozi", "punch", "fire", "karaoke", "mint", "pink", "neon", "minimal", "classic"]
 DEFAULT_STYLE = "hormozi"
 
-PUNCH_CHUNK_SIZE = 2      # слов в кадре для панч-стиля
-KARAOKE_MAX_WORDS = 4     # слов в строке караоке
-KARAOKE_MAX_CHARS = 28
-LINE_MAX_CHARS = 30       # символов в строке line-режима (русский длиннее)
-LINE_MAX_DUR = 3.0        # макс длительность одной строки, сек
+PUNCH_CHUNK_SIZE = 2
+KARAOKE_MAX_WORDS = 4
+KARAOKE_MAX_CHARS = 26
+LINE_MAX_CHARS = 28
+LINE_MAX_DUR = 2.8
+FADE_MS = 120
+WORD_MIN_CS = 4
 
 
 def get_style(key: str) -> SubtitleStyle:
@@ -337,7 +339,10 @@ def _prefix(style: SubtitleStyle) -> str:
     return f"{{\\blur{style.blur}}}" if style.blur else ""
 
 
-def _dialogue(start: float, end: float, text: str) -> str:
+def _dialogue(start: float, end: float, text: str, fade_ms: int = FADE_MS) -> str:
+    fade = max(0, fade_ms)
+    if fade:
+        text = f"{{\\fad({fade},{fade})}}{text}"
     return f"Dialogue: 0,{_ass_time(start)},{_ass_time(end)},R,,0,0,0,,{text}\n"
 
 
@@ -350,9 +355,12 @@ def _highlight_keywords(escaped_text: str, accent: str, base: str) -> str:
     return result.replace("*", "")  # убрать одиночные звёздочки (если пара разорвалась)
 
 
+def _line_timing(start: float, end: float, pad_start: float = 0.04, pad_end: float = 0.12) -> tuple[float, float]:
+    return max(0.0, start - pad_start), end + pad_end
+
+
 def _pop_tag() -> str:
-    # эффект "выпрыгивания" слова
-    return "{\\fscx55\\fscy55\\t(0,130,\\fscx100\\fscy100)}"
+    return "{\\fscx88\\fscy88\\t(0,160,\\fscx100\\fscy100)}"
 
 
 def _build_punch(style: SubtitleStyle, segments: list[SubtitleSegment], accent: str | None) -> list[str]:
@@ -364,8 +372,8 @@ def _build_punch(style: SubtitleStyle, segments: list[SubtitleSegment], accent: 
         chunk = words[i : i + PUNCH_CHUNK_SIZE]
         if not chunk:
             continue
-        start = chunk[0].start
-        end = max(chunk[-1].end, start + 0.3)
+        start, end = _line_timing(chunk[0].start, chunk[-1].end)
+        end = max(end, start + 0.35)
         text = _escape_word(" ".join(w.text for w in chunk))
         if style.uppercase:
             text = text.upper()
@@ -382,15 +390,15 @@ def _build_karaoke(style: SubtitleStyle, segments: list[SubtitleSegment], accent
     for group in _group_words(words, KARAOKE_MAX_WORDS, KARAOKE_MAX_CHARS, LINE_MAX_DUR):
         if not group:
             continue
-        start = group[0].start
-        end = max(group[-1].end, start + 0.3)
+        start, end = _line_timing(group[0].start, group[-1].end)
+        end = max(end, start + 0.4)
         parts: list[str] = []
-        prev_end = start
+        prev_end = group[0].start
         for w in group:
             gap_cs = int(round(max(0.0, w.start - prev_end) * 100))
             if gap_cs > 0:
-                parts.append(f"{{\\k{gap_cs}}}")
-            dur_cs = max(1, int(round((w.end - w.start) * 100)))
+                parts.append(f"{{\\k{min(gap_cs, 30)}}}")
+            dur_cs = max(WORD_MIN_CS, int(round((w.end - w.start) * 100)))
             token = _escape_word(w.text)
             if style.uppercase:
                 token = token.upper()
@@ -414,8 +422,8 @@ def _build_line(style: SubtitleStyle, segments: list[SubtitleSegment], accent: s
             if style.uppercase:
                 text = text.upper()
             text = _highlight_keywords(text, key_accent, base)
-            body = f"{prefix}{{\\c{base}}}{{\\fad(80,80)}}{text}"
-            lines.append(_dialogue(start, max(end, start + 0.4), body))
+            body = f"{prefix}{{\\c{base}}}{text}"
+            lines.append(_dialogue(start, max(end, start + 0.45), body))
     return lines
 
 
