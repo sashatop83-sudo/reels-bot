@@ -27,7 +27,12 @@ class Settings:
     telegram_api_hash: str
     telegram_api_url: str
     payment_provider_token: str
+    payment_vat_code: int
     payment_info: str
+
+    @property
+    def has_yookassa(self) -> bool:
+        return bool(self.payment_provider_token.strip())
 
     @property
     def uses_local_api(self) -> bool:
@@ -88,5 +93,6 @@ def get_settings() -> Settings:
         telegram_api_hash=api_hash,
         telegram_api_url=api_url,
         payment_provider_token=os.getenv("PAYMENT_PROVIDER_TOKEN", "").strip(),
+        payment_vat_code=_int_env("PAYMENT_VAT_CODE", 1),
         payment_info=os.getenv("PAYMENT_INFO", "").strip() or DEFAULT_PAYMENT_INFO,
     )
