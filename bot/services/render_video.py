@@ -116,7 +116,9 @@ def _prepare(
     position_key: str,
     color_key: str,
     size_key: str,
-) -> tuple[str, str, int, int]:
+    for_preview: bool = False,
+    preview_ts: float = 0.0,
+) -> tuple[str, str, bool]:
     local_input = work_dir / "input.mp4"
     ass_path = work_dir / "subs.ass"
     shutil.copy2(video_path, local_input)
@@ -127,7 +129,10 @@ def _prepare(
         "subs.ass", vertical_fit, width, height
     )
 
-    ass_text = build_ass(segments, style_key, font_key, position_key, color_key, canvas_w, canvas_h, size_key)
+    ass_text = build_ass(
+        segments, style_key, font_key, position_key, color_key,
+        canvas_w, canvas_h, size_key, for_preview=for_preview, preview_ts=preview_ts,
+    )
     ass_path.write_text(ass_text, encoding="utf-8")
     return filter_expr, mode, vertical_fit
 
@@ -225,11 +230,12 @@ def render_preview_image(
     ffmpeg_bin = get_ffmpeg_binary()
     work_dir = output_path.parent
 
-    filter_expr, mode, _ = _prepare(
-        video_path, segments, work_dir, style_key, font_key, position_key, color_key, size_key
-    )
-
     ts = _pick_preview_ts(segments, work_dir / "input.mp4")
+
+    filter_expr, mode, _ = _prepare(
+        video_path, segments, work_dir, style_key, font_key, position_key, color_key, size_key,
+        for_preview=True, preview_ts=ts,
+    )
 
     args = [ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error", "-ss", f"{ts:.3f}", "-i", "input.mp4"]
     if mode == "complex":

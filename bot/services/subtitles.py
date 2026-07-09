@@ -303,10 +303,20 @@ def _split_text_timed(seg: SubtitleSegment, max_chars: int) -> list[tuple[float,
     return out
 
 
-def _header(style: SubtitleStyle, font: FontChoice, position: Position, width: int, height: int, size_mult: float = 1.0) -> str:
-    fontsize = max(16, int(height * style.fontsize_ratio * font.size_mult * size_mult))
+def _header(
+    style: SubtitleStyle,
+    font: FontChoice,
+    position: Position,
+    width: int,
+    height: int,
+    size_mult: float = 1.0,
+    outline_override: int | None = None,
+) -> str:
+    fontsize = max(20, int(height * style.fontsize_ratio * font.size_mult * size_mult))
     margin_v = int(height * position.margin_v_ratio)
     margin_h = int(width * 0.07)
+    outline = outline_override if outline_override is not None else style.outline
+    shadow = max(style.shadow, 3) if outline_override else style.shadow
     return f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {width}
@@ -316,7 +326,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: R,{font.family},{fontsize},{style.primary},{WHITE},{style.outline_colour},&H64000000,1,0,0,0,100,100,0,0,1,{style.outline},{style.shadow},{position.alignment},{margin_h},{margin_h},{margin_v},1
+Style: R,{font.family},{fontsize},{style.primary},{WHITE},{style.outline_colour},&H64000000,1,0,0,0,100,100,0,0,1,{outline},{shadow},{position.alignment},{margin_h},{margin_h},{margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -409,6 +419,42 @@ def _build_line(style: SubtitleStyle, segments: list[SubtitleSegment], accent: s
     return lines
 
 
+def _text_at_time(segments: list[SubtitleSegment], ts: float) -> str:
+    for segment in segments:
+        if segment.start - 0.15 <= ts <= segment.end + 0.35 and segment.text.strip():
+            return segment.text
+    words = _all_words(segments)
+    for group in _group_words(words, KARAOKE_MAX_WORDS, KARAOKE_MAX_CHARS, LINE_MAX_DUR):
+        if group[0].start - 0.15 <= ts <= group[-1].end + 0.35:
+            return " ".join(w.text for w in group)
+    if segments:
+        return max(segments, key=lambda s: len(s.text)).text
+    return ""
+
+
+def _build_preview(
+    style: SubtitleStyle,
+    segments: list[SubtitleSegment],
+    accent: str | None,
+    preview_ts: float,
+) -> list[str]:
+    """Один яркий кадр для превью — без полупрозрачного караоке."""
+    highlight = accent or style.highlight or style.primary
+    raw = _text_at_time(segments, preview_ts)
+    text = _escape(raw)
+    if not text:
+        return []
+    if style.uppercase:
+        text = text.upper()
+    body = (
+        f"{{\\bord9\\shad5\\3c{BLACK}\\4c&HA0000000}}"
+        f"{{\\c{WHITE}}}{{\\1c{highlight}}}{text}"
+    )
+    start = max(0.0, preview_ts - 2.0)
+    end = preview_ts + 8.0
+    return [_dialogue(start, end, body)]
+
+
 def build_ass(
     segments: list[SubtitleSegment],
     style_key: str,
@@ -418,14 +464,23 @@ def build_ass(
     width: int,
     height: int,
     size_key: str = DEFAULT_SIZE,
+    for_preview: bool = False,
+    preview_ts: float = 0.0,
 ) -> str:
     style = get_style(style_key)
     font = get_font(font_key)
     position = get_position(position_key)
     accent = get_color(color_key).value
     size_mult = get_size(size_key).mult
-    header = _header(style, font, position, width, height, size_mult)
+    if for_preview:
+        size_mult *= 1.35
+        header = _header(style, font, position, width, height, size_mult, outline_override=9)
+        events = _build_preview(style, segments, accent, preview_ts)
+        if not events:
+            events = _build_line(style, segments, accent)
+        return header + "".join(events)
 
+    header = _header(style, font, position, width, height, size_mult)
     if style.mode == "punch":
         events = _build_punch(style, segments, accent)
     elif style.mode == "karaoke":

@@ -5,6 +5,7 @@ import logging
 import re
 import shutil
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from bot.db import (
     add_bonus,
     can_process_video,
     get_prefs,
+    get_recent_users,
     get_stats,
     increment_usage,
     log_event,
@@ -453,6 +455,9 @@ class TelegramBot:
         if text.startswith("/stats"):
             await self._handle_stats(chat_id, user_id)
             return
+        if text.startswith("/users"):
+            await self._handle_users(chat_id, user_id)
+            return
         if text.startswith("/grant"):
             await self._handle_grant(chat_id, user_id, text)
             return
@@ -543,8 +548,29 @@ class TelegramBot:
             f"💎 С подпиской: {s['premium']}\n"
             f"🎬 Видео всего: {s['videos']}\n"
             f"⚙️ Рендеров за 24ч: {s['renders_24h']}\n"
-            f"💰 Оплат: {s['pays']}",
+            f"💰 Оплат: {s['pays']}\n\n"
+            "Список людей: /users",
         )
+
+    async def _handle_users(self, chat_id: int, user_id: int) -> None:
+        if not self.settings.admin_user_id or user_id != self.settings.admin_user_id:
+            return
+        rows = get_recent_users(30)
+        if not rows:
+            await self.send_message(chat_id, "Пока никого нет.")
+            return
+        lines = ["👥 Кто пользовался ботом (последние 30):\n"]
+        for i, u in enumerate(rows, 1):
+            last = u.get("last_seen")
+            last_s = time.strftime("%d.%m %H:%M", time.localtime(last)) if last else "—"
+            pro = " 💎" if u.get("is_pro") else ""
+            lines.append(
+                f"{i}. id {u['user_id']}{pro} · видео {u['videos_used']} · был {last_s}"
+            )
+        text = "\n".join(lines)
+        if len(text) > 4000:
+            text = text[:3990] + "\n…"
+        await self.send_message(chat_id, text)
 
     # ---------- Payments (₽) ----------
 

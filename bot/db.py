@@ -220,3 +220,27 @@ def get_stats() -> dict:
             "new_24h": new_24h,
             "pays": pays,
         }
+
+
+def get_recent_users(limit: int = 25) -> list[dict]:
+    """Последние пользователи бота (для админа)."""
+    now = time.time()
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                u.user_id,
+                COALESCE(u.videos_used, 0) AS videos_used,
+                COALESCE(u.bonus_videos, 0) AS bonus_videos,
+                u.created_at,
+                CASE WHEN u.is_premium = 1 OR u.premium_until > ? THEN 1 ELSE 0 END AS is_pro,
+                (
+                    SELECT MAX(e.ts) FROM events e WHERE e.user_id = u.user_id
+                ) AS last_seen
+            FROM users u
+            ORDER BY COALESCE(last_seen, 0) DESC, u.created_at DESC
+            LIMIT ?
+            """,
+            (now, limit),
+        ).fetchall()
+    return [dict(r) for r in rows]
