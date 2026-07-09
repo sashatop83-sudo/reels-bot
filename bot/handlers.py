@@ -295,7 +295,12 @@ class TelegramBot:
             "✨ Подсветка слов, авто-вертикаль, чистый звук.\n"
             f"🎁 Бесплатно: {self.settings.free_video_limit} видео.\n"
             f"💎 PRO — {self.settings.price_rub}₽/мес безлимит. Или зови друзей!\n\n"
-            "Пришли видео или ссылку 👇"
+            + (
+                f"💳 PRO оплачивается картой/СБП через ЮKassa — /buy\n\n"
+                if self.settings.has_yookassa
+                else ""
+            )
+            + "Пришли видео или ссылку 👇"
         )
 
     # ---------- Sessions ----------
@@ -466,6 +471,9 @@ class TelegramBot:
         if text.startswith("/grant"):
             await self._handle_grant(chat_id, user_id, text)
             return
+        if text.startswith("/paycheck"):
+            await self._handle_paycheck(chat_id, user_id)
+            return
 
         if message.get("video") or message.get("document"):
             await self._handle_video(chat_id, user_id, message.get("video"), message.get("document"))
@@ -503,9 +511,10 @@ class TelegramBot:
         left = remaining_videos(user_id, self.settings.free_video_limit)
         if left == "безлимит":
             return "💎 У тебя активна PRO — безлимит видео!"
+        pay = f"💳 Оплата картой/СБП: /buy ({self.settings.price_rub}₽)" if self.settings.has_yookassa else f"💎 PRO — {self.settings.price_rub}₽/мес: /buy"
         return (
             f"📊 Осталось бесплатных видео: {left}\n\n"
-            f"💎 PRO — {self.settings.price_rub}₽/мес, безлимит: /buy\n"
+            f"{pay}\n"
             "👥 Или пригласи друга (+видео обоим): /invite"
         )
 
@@ -590,51 +599,81 @@ class TelegramBot:
         price = self.settings.price_rub
         days = self.settings.sub_days
         title = "PRO-подписка ReelsBot"
-        description = f"Безлимит видео с субтитрами на {days} дней."
+        description = f"Безлимит видео с субтитрами на {days} дней — {price}₽."
 
-        if self.settings.has_yookassa:
+        if not self.settings.has_yookassa:
+            await self.send_message(
+                chat_id,
+                "⚠️ Онлайн-оплата пока не настроена.\n"
+                "Админ: добавь PAYMENT_PROVIDER_TOKEN в Railway (токен из BotFather → Payments).\n\n"
+                f"💎 PRO — {price}₽ на {days} дней:\n{self.settings.payment_info}",
+                reply_markup=self._pay_manual_keyboard(user_id),
+            )
+            return
+
+        base_params = {
+            "chat_id": chat_id,
+            "title": title,
+            "description": description,
+            "payload": "sub_pro",
+            "provider_token": self.settings.payment_provider_token,
+            "currency": "RUB",
+            "prices": invoice_prices(price, days),
+        }
+        attempts: list[dict] = [
+            {
+                **base_params,
+                "provider_data": yookassa_provider_data(
+                    price,
+                    title,
+                    self.settings.payment_vat_code,
+                    self.settings.payment_tax_system_code,
+                ),
+                "need_email": True,
+                "send_email_to_provider": True,
+            },
+            base_params,
+        ]
+
+        last_exc: Exception | None = None
+        for params in attempts:
             try:
-                params = {
-                    "chat_id": chat_id,
-                    "title": title,
-                    "description": description,
-                    "payload": "sub_pro",
-                    "provider_token": self.settings.payment_provider_token,
-                    "currency": "RUB",
-                    "prices": invoice_prices(price, days),
-                    "provider_data": yookassa_provider_data(
-                        price, title, self.settings.payment_vat_code
-                    ),
-                    "need_email": True,
-                    "send_email_to_provider": True,
-                }
                 await self._api("sendInvoice", **params)
-                await self.send_message(
-                    chat_id,
-                    f"💳 Счёт на {price}₽ — оплати картой или СБП.\n"
-                    "PRO включится сразу после оплаты.",
-                )
                 return
             except Exception as exc:
-                logger.exception("Invoice failed")
-                await self.send_message(
-                    chat_id,
-                    f"⚠️ Не удалось выставить счёт: {exc}\n\n"
-                    "Напиши админу или попробуй позже.",
-                )
-                if self.settings.payment_info:
-                    await self.send_message(
-                        chat_id,
-                        f"Резервный способ:\n{self.settings.payment_info}",
-                        reply_markup=self._pay_manual_keyboard(user_id),
-                    )
-                return
+                last_exc = exc
+                logger.exception("Invoice failed (attempt)")
 
         await self.send_message(
             chat_id,
-            f"💎 PRO-подписка — {price}₽ на {days} дней (безлимит видео).\n\n"
-            f"{self.settings.payment_info}",
-            reply_markup=self._pay_manual_keyboard(user_id),
+            f"⚠️ Не удалось выставить счёт ЮKassa: {last_exc}\n\n"
+            "Проверь PAYMENT_PROVIDER_TOKEN в Railway и Live-режим в BotFather.",
+        )
+
+    async def _handle_paycheck(self, chat_id: int, user_id: int) -> None:
+        if not self.settings.admin_user_id or user_id != self.settings.admin_user_id:
+            return
+        if not self.settings.has_yookassa:
+            await self.send_message(
+                chat_id,
+                "❌ PAYMENT_PROVIDER_TOKEN не задан в Railway.\n\n"
+                "BotFather → твой бот → Payments → ЮKassa → скопируй Provider token → "
+                "Railway Variables → PAYMENT_PROVIDER_TOKEN",
+            )
+            return
+        tok = self.settings.payment_provider_token
+        if ":LIVE:" in tok:
+            mode = "LIVE ✅"
+        elif ":TEST:" in tok:
+            mode = "TEST (только тестовые карты)"
+        else:
+            mode = "неизвестный формат"
+        await self.send_message(
+            chat_id,
+            f"✅ ЮKassa в боте подключена\n"
+            f"Режим: {mode}\n"
+            f"Цена: {self.settings.price_rub}₽ / {self.settings.sub_days} дн.\n\n"
+            "Проверка: /buy — должен прийти счёт Telegram на оплату.",
         )
 
     async def _handle_paid_click(self, chat_id: int, user_id: int, username: str) -> None:

@@ -28,6 +28,7 @@ class Settings:
     telegram_api_url: str
     payment_provider_token: str
     payment_vat_code: int
+    payment_tax_system_code: int
     payment_info: str
 
     @property
@@ -94,5 +95,6 @@ def get_settings() -> Settings:
         telegram_api_url=api_url,
         payment_provider_token=os.getenv("PAYMENT_PROVIDER_TOKEN", "").strip(),
         payment_vat_code=_int_env("PAYMENT_VAT_CODE", 1),
+        payment_tax_system_code=_int_env("PAYMENT_TAX_SYSTEM_CODE", 2),
         payment_info=os.getenv("PAYMENT_INFO", "").strip() or DEFAULT_PAYMENT_INFO,
     )
