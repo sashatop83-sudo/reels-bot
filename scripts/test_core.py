@@ -3,7 +3,7 @@
 
 import time
 
-from bot.db import init_db, try_start_welcome, claim_update
+from bot.db import init_db, try_start_welcome, claim_update, can_process_video, remaining_videos
 from bot.services.transcribe import (
     SubtitleSegment,
     Word,
@@ -57,6 +57,16 @@ def test_text_edit_keeps_timing():
     print("edit timing OK")
 
 
+def test_admin_unlimited():
+    init_db()
+    admin_id = 42_000_000 + int(time.time()) % 100_000
+    assert can_process_video(admin_id, free_limit=2, admin_user_id=admin_id) is True
+    assert remaining_videos(admin_id, free_limit=2, admin_user_id=admin_id) == "безлимит"
+    other_id = admin_id + 1
+    assert can_process_video(other_id, free_limit=0, admin_user_id=admin_id) is False
+    print("admin unlimited OK")
+
+
 def test_ass_build():
     segs = [SubtitleSegment(0, 3, "тест субтитров", [Word("тест", 0, 1), Word("субтитров", 1, 3)])]
     assert _all_words(segs)
@@ -71,5 +81,6 @@ if __name__ == "__main__":
     test_align_no_early_cut()
     test_align_compress_when_needed()
     test_text_edit_keeps_timing()
+    test_admin_unlimited()
     test_ass_build()
     print("\nALL OK")

@@ -97,7 +97,13 @@ def is_active_premium(user: sqlite3.Row) -> bool:
     return bool(user["premium_until"] and user["premium_until"] > time.time())
 
 
-def can_process_video(user_id: int, free_limit: int) -> bool:
+def is_admin(user_id: int, admin_user_id: int) -> bool:
+    return bool(admin_user_id) and user_id == admin_user_id
+
+
+def can_process_video(user_id: int, free_limit: int, admin_user_id: int = 0) -> bool:
+    if is_admin(user_id, admin_user_id):
+        return True
     user = get_user(user_id)
     if is_active_premium(user):
         return True
@@ -114,7 +120,9 @@ def increment_usage(user_id: int) -> None:
         conn.commit()
 
 
-def remaining_videos(user_id: int, free_limit: int) -> int | str:
+def remaining_videos(user_id: int, free_limit: int, admin_user_id: int = 0) -> int | str:
+    if is_admin(user_id, admin_user_id):
+        return "безлимит"
     user = get_user(user_id)
     if is_active_premium(user):
         return "безлимит"

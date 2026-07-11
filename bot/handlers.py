@@ -513,7 +513,11 @@ class TelegramBot:
     # ---------- Commands ----------
 
     def _status_text(self, user_id: int) -> str:
-        left = remaining_videos(user_id, self.settings.free_video_limit)
+        left = remaining_videos(
+            user_id, self.settings.free_video_limit, self.settings.admin_user_id
+        )
+        if self.settings.admin_user_id and user_id == self.settings.admin_user_id:
+            return "👑 Ты админ — безлимит видео!"
         if left == "безлимит":
             return "💎 У тебя активна PRO — безлимит видео!"
         pay = f"💳 Оплата картой/СБП: /buy ({self.settings.price_rub}₽)" if self.settings.has_yookassa else f"💎 PRO — {self.settings.price_rub}₽/мес: /buy"
@@ -808,7 +812,9 @@ class TelegramBot:
             shutil.rmtree(work_dir, ignore_errors=True)
 
     async def _handle_video(self, chat_id, user_id, video, document) -> None:
-        if not can_process_video(user_id, self.settings.free_video_limit):
+        if not can_process_video(
+            user_id, self.settings.free_video_limit, self.settings.admin_user_id
+        ):
             await self.send_message(
                 chat_id,
                 "😔 Бесплатные видео закончились.\n\n"
@@ -869,7 +875,9 @@ class TelegramBot:
             self.busy.discard(user_id)
 
     async def _handle_url(self, chat_id: int, user_id: int, url: str) -> None:
-        if not can_process_video(user_id, self.settings.free_video_limit):
+        if not can_process_video(
+            user_id, self.settings.free_video_limit, self.settings.admin_user_id
+        ):
             await self.send_message(
                 chat_id,
                 "😔 Бесплатные видео закончились.\n\n"
@@ -1045,7 +1053,11 @@ class TelegramBot:
             await self.send_video(chat_id, result_path, caption)
 
             if not session.counted:
-                increment_usage(user_id)
+                if not (
+                    self.settings.admin_user_id
+                    and user_id == self.settings.admin_user_id
+                ):
+                    increment_usage(user_id)
                 session.counted = True
                 log_event(user_id, "render")
             save_prefs(user_id, session.style, session.font, session.position, session.color, session.size)
