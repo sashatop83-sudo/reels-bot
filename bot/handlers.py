@@ -2,10 +2,12 @@ import asyncio
 import html
 import json
 import logging
+import os
 import re
 import shutil
 import tempfile
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,10 +24,12 @@ from bot.db import (
     increment_usage,
     load_poll_offset,
     log_event,
+    release_update,
     remaining_videos,
     save_poll_offset,
     save_prefs,
     set_premium,
+    try_acquire_poll_lock,
     try_set_referrer,
 )
 from bot.telegram_files import download_telegram_file
@@ -93,6 +97,7 @@ class TelegramBot:
         self.busy: set[int] = set()
         self.render_sem = asyncio.Semaphore(settings.max_concurrent_renders)
         self.bot_username = ""
+        self.instance_id = os.getenv("RAILWAY_REPLICA_ID") or uuid.uuid4().hex[:8]
 
     # ---------- Telegram API ----------
 
@@ -1076,6 +1081,7 @@ class TelegramBot:
         await self.set_commands()
         try:
             await self._api("deleteWebhook", drop_pending_updates=True)
+            logger.info("Webhook cleared — polling mode")
         except Exception:
             logger.warning("deleteWebhook failed", exc_info=True)
         self.offset = load_poll_offset()
@@ -1083,14 +1089,24 @@ class TelegramBot:
             me = await self._api("getMe")
             self.bot_username = me.get("username", "")
         except Exception:
-            pass
+            logger.exception("getMe failed on startup")
         logger.info(
-            "Reels bot polling started (offset=%s)%s",
+            "Reels bot polling started (offset=%s, instance=%s, bot=@%s)%s",
             self.offset,
+            self.instance_id,
+            self.bot_username or "?",
             " | ЮKassa ON" if self.settings.has_yookassa else "",
         )
         while True:
             try:
+                if not try_acquire_poll_lock(self.instance_id):
+                    logger.warning(
+                        "Another bot instance holds poll lock — waiting (instance=%s)",
+                        self.instance_id,
+                    )
+                    await asyncio.sleep(5)
+                    continue
+
                 updates = await self._api(
                     "getUpdates",
                     offset=self.offset,
@@ -1105,9 +1121,17 @@ class TelegramBot:
                     try:
                         await self.handle_update(update)
                     except Exception:
+                        release_update(uid)
                         logger.exception("handle_update failed for %s", uid)
                 if updates:
                     save_poll_offset(self.offset)
+            except RuntimeError as exc:
+                msg = str(exc)
+                if "409" in msg or "Conflict" in msg:
+                    logger.warning("Telegram polling conflict (две копии бота?): %s", msg)
+                else:
+                    logger.exception("Polling error: %s", msg)
+                await asyncio.sleep(3)
             except Exception:
                 logger.exception("Polling error")
                 await asyncio.sleep(3)

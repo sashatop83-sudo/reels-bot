@@ -3,7 +3,14 @@
 
 import time
 
-from bot.db import init_db, try_start_welcome, claim_update, can_process_video, remaining_videos
+from bot.db import (
+    init_db,
+    try_start_welcome,
+    claim_update,
+    release_update,
+    can_process_video,
+    remaining_videos,
+)
 from bot.services.transcribe import (
     SubtitleSegment,
     Word,
@@ -67,6 +74,16 @@ def test_admin_unlimited():
     print("admin unlimited OK")
 
 
+def test_release_update_allows_retry():
+    init_db()
+    uid = 200_000 + int(time.time()) % 50_000
+    assert claim_update(uid) is True
+    assert claim_update(uid) is False
+    release_update(uid)
+    assert claim_update(uid) is True
+    print("release update OK")
+
+
 def test_ass_build():
     segs = [SubtitleSegment(0, 3, "тест субтитров", [Word("тест", 0, 1), Word("субтитров", 1, 3)])]
     assert _all_words(segs)
@@ -82,5 +99,6 @@ if __name__ == "__main__":
     test_align_compress_when_needed()
     test_text_edit_keeps_timing()
     test_admin_unlimited()
+    test_release_update_allows_retry()
     test_ass_build()
     print("\nALL OK")

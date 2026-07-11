@@ -322,6 +322,48 @@ def claim_update(update_id: int) -> bool:
         conn.close()
 
 
+def release_update(update_id: int) -> None:
+    """Снять claim, если обработка упала — Telegram сможет отдать апдейт снова."""
+    with _connect() as conn:
+        conn.execute("DELETE FROM processed_updates WHERE update_id = ?", (update_id,))
+        conn.commit()
+
+
+def try_acquire_poll_lock(instance_id: str, ttl_sec: float = 45.0) -> bool:
+    """Только один инстанс бота делает getUpdates (иначе Telegram 409 Conflict)."""
+    now = time.time()
+    conn = _connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS poll_lock (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                holder TEXT NOT NULL,
+                expires_at REAL NOT NULL
+            )
+            """
+        )
+        row = conn.execute("SELECT holder, expires_at FROM poll_lock WHERE id = 1").fetchone()
+        if row and row["expires_at"] > now and row["holder"] != instance_id:
+            conn.rollback()
+            return False
+        conn.execute(
+            """
+            INSERT INTO poll_lock (id, holder, expires_at) VALUES (1, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET holder = excluded.holder, expires_at = excluded.expires_at
+            """,
+            (instance_id, now + ttl_sec),
+        )
+        conn.commit()
+        return True
+    except Exception:
+        conn.rollback()
+        return True
+    finally:
+        conn.close()
+
+
 def _trim_processed_updates(conn: sqlite3.Connection) -> None:
     conn.execute(
         "DELETE FROM processed_updates WHERE update_id NOT IN "
